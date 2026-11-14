@@ -48,6 +48,17 @@ public class CounterAi extends SpellAbilityAi {
 
         if (sa.usesTargeting()) {
             final SpellAbility topSA = ComputerUtilAbility.getTopSpellAbilityOnStack(game, sa);
+            // magic-tools: rule 171 (relevé « mana perdu » v209, Eldratron - Avacyn t6-8 : Spell Burst gardait le mana
+            // de Culling Scales et ne se lançait jamais) : « counter target spell with mana value X » se ciblait avec
+            // X = 0 ; X prend la valeur du sort visé, s'il est payable
+            if (XCounterAi.isXCounter(sa) && topSA.getHostCard() != null) {
+                sa.setXManaCostPaid(topSA.getHostCard().getCMC());
+                if (!ComputerUtilMana.canPayManaCost(sa, ai, 0, false)) {
+                    sa.setXManaCostPaid(null);
+                    return new AiAbilityDecision(0, AiPlayDecision.CantAffordX);
+                }
+            }
+
             if ((topSA.isSpell() && !topSA.isCounterableBy(sa)) || ai.getYourTeam().contains(topSA.getActivatingPlayer())) {
                 // might as well check for player's friendliness
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
@@ -195,6 +206,11 @@ public class CounterAi extends SpellAbilityAi {
                     dontCounter = false;
                 }
             }
+        }
+
+        // magic-tools: ALWAYS_COUNTER_* flags beat the mana value chances
+        if (dontCounter && CounterChoiceAi.alwaysCounter(ai, tgtSA)) {
+            dontCounter = false;
         }
 
         // Should ALWAYS counter if it doesn't spend a card, otherwise it wastes an opportunity

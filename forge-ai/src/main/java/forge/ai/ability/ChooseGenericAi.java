@@ -86,7 +86,9 @@ public class ChooseGenericAi extends SpellAbilityAi {
         final Game game = host.getGame();
         final String logic = sa.getParam("AILogic");
         if (logic == null) {
-            return spells.get(0);
+            // magic-tools: rule 123, land or nonland for a "dig until → hand" choice (Pavel Chekov, Abundance)
+            SpellAbility dig = DrawDig123.pick(player, spells);
+            return dig != null ? dig : spells.get(0);
         } else if ("Random".equals(logic)) {
             return Aggregates.random(spells);
         } else if ("Phasing".equals(logic)) { // Teferi's Realm : keep aggressive

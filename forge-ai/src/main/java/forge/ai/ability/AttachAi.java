@@ -61,6 +61,11 @@ public class AttachAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.WouldDestroyLegend);
         }
 
+        // magic-tools: rule 83, a castable creature that the aura's mana would push out of main 2 goes first
+        if (BodyFirstAi.waitsForBody(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.AnotherTime);
+        }
+
         // Attach spells always have a target
         final TargetRestrictions tgt = sa.getTargetRestrictions();
         if (tgt != null) {
@@ -115,7 +120,9 @@ public class AttachAi extends SpellAbilityAi {
             }
         }
 
-        boolean isBuffAura = !sa.isCurse() && (power > 0 || toughness > 0 || !keywords.isEmpty());
+        boolean isBuffAura = !sa.isCurse() && (power > 0 || toughness > 0 || !keywords.isEmpty())
+                // magic-tools: rule 234, Dog Umbra's keyword is its own: a restriction is no combat trick
+                && !(sa.getParam("AILogic") == null && "Curse".equals(forge.ai.UnscriptedAuraAi.infer(source)));
         if (!isBuffAura) {
             // Currently only works with buff auras, otherwise returns true for instant speed use. To be improved later.
             return true;
@@ -586,7 +593,9 @@ public class AttachAi extends SpellAbilityAi {
             return result;
         });
 
-        final Card c = ComputerUtilCard.getBestCreatureAI(betterList);
+        // magic-tools: rule 37, Iona against a deck leaning on one colour, otherwise the best fatty
+        final Card fatty = forge.ai.ReanimatorAi.chooseFatty(ai, new CardCollection(betterList));
+        final Card c = fatty != null ? fatty : ComputerUtilCard.getBestCreatureAI(betterList);
 
         // If Mandatory (brought directly into play without casting) gotta
         // choose something
@@ -602,6 +611,10 @@ public class AttachAi extends SpellAbilityAi {
         Card chosen = null;
         int priority = 0;
         for (Card card : list) {
+            // magic-tools: rule 252, a damage-draw aura goes on a creature that deals damage this turn, one per creature
+            if (forge.ai.DrawAuraNow252.skip(sa.getActivatingPlayer(), card, attachSource, mandatory)) {
+                continue;
+            }
             int cardPriority = 0;
             // Prefer Evasion
             if (card.hasKeyword(Keyword.TRAMPLE)) {
@@ -629,18 +642,21 @@ public class AttachAi extends SpellAbilityAi {
             }
             // Prefer "tap to deal damage"
             // TODO : Skip this one if triggers on combat damage only?
+            // magic-tools: rule 233, a pinger draws with its ability: neither 0 power nor defender stops it (Gelectrode)
+            boolean pinger = false;
             for (SpellAbility sa2 : card.getSpellAbilities()) {
                 if (ApiType.DealDamage.equals(sa2.getApi()) && sa2.usesTargeting() && sa2.getTargetRestrictions().canTgtPlayer()) {
                     cardPriority += 300;
+                    pinger |= sa2.hasParam("NumDmg") && AbilityUtils.calculateAmount(card, sa2.getParam("NumDmg"), sa2) > 0;
                 }
             }
             // Prefer stronger creatures, avoid if can't attack
             cardPriority += card.getCurrentToughness() * 2;
             cardPriority += card.getCurrentPower();
-            if (card.getCurrentPower() <= 0) {
+            if (card.getCurrentPower() <= 0 && !pinger) {
                 cardPriority = -100;
             }
-            if (card.hasKeyword(Keyword.DEFENDER)) {
+            if (card.hasKeyword(Keyword.DEFENDER) && !pinger) {
                 cardPriority = -100;
             }
             if (card.hasKeyword(Keyword.INDESTRUCTIBLE)) {
@@ -1165,6 +1181,12 @@ public class AttachAi extends SpellAbilityAi {
             }
         }
 
+        // magic-tools: rule 102, an attachment that pays when its creature dies goes on a creature it kills
+        final Card deathFodder = forge.ai.DeathPayoffAttachAi.fodder(ai, attachSource, list);
+        if (deathFodder != null) {
+            return deathFodder;
+        }
+
         CardCollection prefList = new CardCollection(list);
 
         // Filter AI-specific targets if provided
@@ -1193,6 +1215,10 @@ public class AttachAi extends SpellAbilityAi {
                     // consider +2 power a significant bonus on Infect creatures
                     return true;
                 }
+                // magic-tools: rule 237, the power of an aura that comes back to hand counts even when its keyword is already there
+                if (pow > 0 && forge.ai.StackAuraAi.comesBack(attachSource)) {
+                    return true;
+                }
                 if (extraBlock && CombatUtil.canBlock(c, true) && !c.canBlockAny()) {
                     return true;
                 }
@@ -1215,7 +1241,15 @@ public class AttachAi extends SpellAbilityAi {
             if (!attachSource.getName().equals("Daybreak Coronet")) {
                 // TODO For Auras like Rancor, that aren't as likely to lead to
                 // card disadvantage, this check should be skipped
+                // magic-tools: rule 92, an aura still stacks on an enchanted creature nothing can block
+                final CardCollection beforeAura = prefList;
                 prefList = CardLists.filter(prefList, c -> !c.isEnchanted() || c.hasKeyword(Keyword.HEXPROOF));
+                if (prefList.isEmpty()) {
+                    // magic-tools: rule 237, an aura that comes back to hand risks no two-for-one (Forge's own TODO above)
+                    prefList = forge.ai.StackAuraAi.comesBack(attachSource)
+                            ? CardLists.filter(beforeAura, c -> c.isCreature() && c.getController().equals(ai))
+                            : forge.ai.StackAuraAi.unblockable(ai, beforeAura);
+                }
             }
 
             // should not attach Auras to creatures that does leave the play
@@ -1241,6 +1275,9 @@ public class AttachAi extends SpellAbilityAi {
         if (canOnlyTargetCreatures && (attachSource.isAura() || attachSource.isEquipment())) {
             prefList = CardLists.filter(prefList, c -> c.getTimesCrewedThisTurn() == 0 || (attachSource.isEquipment() && attachSource.getGame().getPhaseHandler().is(PhaseType.MAIN1, ai)));
         }
+
+        // magic-tools: rule 307, an aura that only adds power goes on a real attacker, not on a mana creature
+        prefList = new CardCollection(forge.ai.OffensiveAura307Ai.filter(ai, attachSource, prefList, totPower, totToughness, grantingAbilities));
 
         if (!grantingAbilities) {
             // Probably prefer to Enchant Creatures that Can Attack
@@ -1344,6 +1381,11 @@ public class AttachAi extends SpellAbilityAi {
 
         Card c = attachGeneralAI(aiPlayer, sa, prefList, mandatory, attachSource, sa.getParam("AILogic"));
 
+        // magic-tools: rule 102, moving Skullclamp onto a creature it kills is a fresh payoff every time
+        if (c != null && forge.ai.DeathPayoffAttachAi.isFodder(aiPlayer, attachSource, c)) {
+            return c;
+        }
+
         AiController aic = ((PlayerControllerAi)aiPlayer.getController()).getAi();
         if (c != null && attachSource.isEquipment()
                 && attachSource.isEquipping()
@@ -1418,7 +1460,9 @@ public class AttachAi extends SpellAbilityAi {
      * @return the card
      */
     public static Card attachGeneralAI(final Player ai, final SpellAbility sa, final List<Card> list, final boolean mandatory,
-            final Card attachSource, final String logic) {
+            final Card attachSource, final String scriptedLogic) {
+        // magic-tools: rule 234, an aura whose script has no logic gets one from its own effects
+        final String logic = scriptedLogic != null ? scriptedLogic : forge.ai.UnscriptedAuraAi.infer(attachSource);
         // AI logic types that do not require a prefList and that evaluate the
         // usefulness of attach action autonomously
         if ("InstantReequipPowerBuff".equals(logic)) {
@@ -1470,6 +1514,9 @@ public class AttachAi extends SpellAbilityAi {
         } else if ("HighestEvaluation".equals(logic)) {
             c = attachAIHighestEvaluationPreference(prefList);
         }
+
+        // magic-tools: rule 301, an aura that adds mana goes on an untapped land
+        c = forge.ai.ManaAura301Ai.retarget(ai, attachSource, prefList, c);
 
         // Consider exceptional cases which break the normal evaluation rules
         if (!isUsefulAttachAction(ai, c, sa)) {

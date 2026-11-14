@@ -33,6 +33,14 @@ public class DestroyAllAi extends SpellAbilityAi {
 
     @Override
     public AiAbilityDecision chkDrawback(Player aiPlayer, SpellAbility sa) {
+        // magic-tools: rule 181, the spell that gives the energy already judged the sweep (ThresholdSweepAi)
+        if (ThresholdSweepAi.isEnergySweep(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 238, the empty Pump already chose the target (Maelstrom Pulse)
+        if (forge.ai.TargetCarrierAi.isCarrier(sa.getRootAbility())) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         return doMassRemovalLogic(aiPlayer, sa);
     }
 
@@ -63,7 +71,15 @@ public class DestroyAllAi extends SpellAbilityAi {
         String valid = sa.getParamOrDefault("ValidCards", "");
 
         if (valid.contains("X") && sa.getSVar("X").equals("Count$xPaid")) {
-            ComputerUtilCost.setMaxXValue(sa, ai, sa.isTrigger());
+            final int maxX = ComputerUtilCost.setMaxXValue(sa, ai, sa.isTrigger());
+            // magic-tools: rule 181, the X that hurts the opponents most and us least, not the biggest
+            if (valid.contains("cmcLEX")) {
+                final int t = ThresholdSweepAi.best(ai, sa, valid, "X", maxX);
+                if (t < 0) {
+                    return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+                }
+                sa.setXManaCostPaid(t);
+            }
         }
 
         // TODO should probably sort results when targeted to use on biggest threat instead of first match
@@ -135,7 +151,7 @@ public class DestroyAllAi extends SpellAbilityAi {
                 if (!containsAttacker) {
                     return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                 }
-                AiBlockController block = new AiBlockController(ai, false);
+                AiBlockController block = new AiBlockController(ai, ai);
                 block.assignBlockersForCombat(combat);
 
                 if (ComputerUtilCombat.lifeInSeriousDanger(ai, combat)) {
@@ -148,6 +164,10 @@ public class DestroyAllAi extends SpellAbilityAi {
                     // TODO Should care about any land recursion, not just Crucible of Worlds
                     return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
 
+                }
+                // magic-tools: rule 20, we keep our (indestructible) lands and the opponent loses theirs
+                if (LandWipeAi.oneSided(ai, opponent, ailist, opplist, source)) {
+                    return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
                 }
                 // evaluate the situation with creatures on the battlefield separately, as that's where the AI typically makes mistakes
                 CardCollection aiCreatures = ai.getCreaturesInPlay();
@@ -175,6 +195,11 @@ public class DestroyAllAi extends SpellAbilityAi {
     @Override
     public boolean willPayUnlessCost(Player payer, SpellAbility sa, Cost cost, boolean alreadyPaid, FCollectionView<Player> payers) {
         final Card source = sa.getHostCard();
+        // magic-tools: rule 181, the energy of Wrath of the Skies is paid when the sweep favours us
+        if (ThresholdSweepAi.isEnergySweep(sa) && payers.size() == 1) {
+            return ThresholdSweepAi.score(payer, sa, sa.getParam("ValidCards")) > 0
+                    && super.willPayUnlessCost(payer, sa, cost, alreadyPaid, payers);
+        }
         if (payers.size() > 1) {
             if (alreadyPaid) {
                 return false;

@@ -596,6 +596,10 @@ public class EffectAi extends SpellAbilityAi {
 
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         } else { //no AILogic
+            // magic-tools: rule 90, a "whenever you cast" boon (Glimpse of Nature) when the hand feeds it
+            if (CastBoonAi.worth(ai, sa)) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 

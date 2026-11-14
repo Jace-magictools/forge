@@ -5711,6 +5711,10 @@ public class Card extends GameEntity implements Comparable<Card>, IHasSVars, ITr
     }
     public final void setPhasedOut(final Player phasedOut0) {
         if (phasedOut == phasedOut0) { return; }
+        // le champ de bataille filtre les cartes hors phase (cache des zones sources, PR #11931)
+        if (game != null && getZone() != null) {
+            game.bumpZoneVersion();
+        }
         phasedOut = phasedOut0;
         view.updatePhasedOut(this);
     }

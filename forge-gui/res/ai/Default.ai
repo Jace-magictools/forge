@@ -349,3 +349,6 @@ FLAT_MC_DISCOVERY=true
 FLAT_MC_EXTRA_CANDIDATES=3
 FLAT_MC_LAND_CHOICE=true
 FLAT_MC_REACTIVE=true
+# Once this many creatures are on the battlefield, combat evaluations may take approximate shortcuts to save time.
+# Set to -1 to always evaluate exactly
+SHORTCUT_MIN_CREATURES=10

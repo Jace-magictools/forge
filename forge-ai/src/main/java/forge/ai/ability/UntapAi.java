@@ -1,5 +1,7 @@
 package forge.ai.ability;
 
+import forge.ai.UntapManaAi;
+
 import java.util.List;
 import java.util.Map;
 
@@ -38,7 +40,14 @@ public class UntapAi extends SpellAbilityAi {
     @Override
     protected boolean checkAiLogic(final Player ai, final SpellAbility sa, final String aiLogic) {
         if ("PoolExtraMana".equals(aiLogic)) {
-            return doPoolExtraManaLogic(ai, sa);
+            // magic-tools: rule 207, rule 146's plan works in main 1 too (Arbor Elf, tester a test game)
+            return UntapManaAi.hasManaPlan(ai, sa) || doPoolExtraManaLogic(ai, sa);
+        }
+        if ("UntapManaCreature".equals(aiLogic)) {
+            return doUntapManaCreatureLogic(ai, sa);
+        }
+        if ("UntapManaPermanent".equals(aiLogic)) {
+            return doUntapManaPermanentLogic(ai, sa);
         }
         if ("PreventCombatDamage".equals(aiLogic)) {
             return doPreventCombatDamageLogic(ai, sa);
@@ -62,6 +71,23 @@ public class UntapAi extends SpellAbilityAi {
     protected AiAbilityDecision checkApiLogic(Player ai, SpellAbility sa) {
         final Card source = sa.getHostCard();
 
+        // magic-tools: rule 146, the land just tapped for a cost one land short gets untapped to be tapped again
+        // (or, Krosan Restorer with threshold, the best tapped lands when their mana reaches a wanted cost)
+        if (UntapManaAi.declineForSibling(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+        final List<Card> manaLands = UntapManaAi.chooseLands(ai, sa);
+        if (manaLands != null) {
+            sa.resetTargets();
+            for (final Card land : manaLands) {
+                sa.getTargets().add(land);
+            }
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        if (UntapManaAi.saveForEngine(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         if (sa.usesTargeting()) {
             if (untapPrefTargeting(ai, sa, false)) {
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
@@ -84,6 +110,17 @@ public class UntapAi extends SpellAbilityAi {
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
             }
             if ("Never".equals(sa.getParam("AILogic"))) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+            // magic-tools: rule 160, "untap up to N lands" (UntapType) has no Defined card: Defined names the player
+            // who untaps, and the old fallback to Self (the card, untapped in hand) refused the trigger, so a creature
+            // with this ETB (Peregrine Drake) was never cast. We gain when we (or a teammate) choose what untaps.
+            if (sa.hasParam("UntapType")) {
+                for (final Player p : AbilityUtils.getDefinedPlayers(sa.getHostCard(), sa.getParam("Defined"), sa)) {
+                    if (!p.isOpponentOf(ai)) {
+                        return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+                    }
+                }
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
 
@@ -401,9 +438,192 @@ public class UntapAi extends SpellAbilityAi {
     private static boolean alreadyAssignedTarget(final SpellAbility sa) {
         if (sa.hasParam("AILogic")) {
             String aiLogic = sa.getParam("AILogic");
-            return "PreventCombatDamage".equals(aiLogic);
+            return "PreventCombatDamage".equals(aiLogic) || "UntapManaCreature".equals(aiLogic)
+                    || "UntapManaPermanent".equals(aiLogic);
         }
         return false;
+    }
+
+    /**
+     * Quirion Ranger, Wirewood Symbiote : dégager une créature de mana engagée (ex. Elvish Archdruid)
+     * seulement si, une fois dégagée (et la carte du coût renvoyée), un sort de la main qu'on ne peut
+     * pas payer maintenant devient payable. La cible est choisie ici.
+     * Limite : la carte renvoyée compte encore pour les créatures qui comptent les Elfes.
+     */
+    private boolean doUntapManaCreatureLogic(final Player ai, final SpellAbility sa) {
+        final Card source = sa.getHostCard();
+        final Game game = ai.getGame();
+        final PhaseHandler ph = game.getPhaseHandler();
+        if (!ph.isPlayerTurn(ai) || !ph.getPhase().isMain() || !game.getStack().isEmpty()) {
+            return false;
+        }
+
+        List<SpellAbility> wanted = unpayableSpellsInHand(ai, null);
+        if (wanted.isEmpty()) {
+            return false;
+        }
+
+        CardCollection tapped = CardLists.filter(ai.getCreaturesInPlay(), CardPredicates.TAPPED);
+        tapped = CardLists.getTargetableCards(tapped, sa);
+        tapped = CardLists.filter(tapped, c -> manaProducedBy(ai, c) > 0);
+        CardLists.sortByPowerDesc(tapped);
+        // règle 68 : le plus de mana d'abord (Elvish Archdruid avant Llanowar Elves, même à force égale)
+        tapped.sort(java.util.Comparator.comparingInt((Card c) -> -manaProducedBy(ai, c)));
+        for (Card c : tapped) {
+            CardCollection payment = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield),
+                    returnCostType(sa).split(";"), ai, source, sa);
+            payment.remove(c);
+            if (payment.isEmpty()) {
+                continue;
+            }
+            Card paid = orderReturnPayment(ai, payment).getFirst();
+            boolean paidWasUntapped = paid.isUntapped();
+            // simulation : la cible dégagée, la carte du coût engagée (elle quitte le champ de bataille)
+            c.setTapped(false);
+            paid.setTapped(true);
+            try {
+                for (SpellAbility ab : wanted) {
+                    if (ComputerUtilMana.canPayManaCost(ab, ai, 0, false)) {
+                        sa.resetTargets();
+                        sa.getTargets().add(c);
+                        return true;
+                    }
+                }
+            } finally {
+                paid.setTapped(!paidWasUntapped);
+                c.setTapped(true);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Kiora's Follower ({T} : dégagez un autre permanent) : en phase principale de l'IA, pile vide, dégager
+     * le permanent engagé qui donne le plus de mana (terrain enchanté par Wild Growth, Cloudpost, créature de
+     * mana) seulement si un sort de la main qu'on ne peut pas payer maintenant devient payable.
+     */
+    private boolean doUntapManaPermanentLogic(final Player ai, final SpellAbility sa) {
+        final Game game = ai.getGame();
+        final PhaseHandler ph = game.getPhaseHandler();
+        if (!ph.isPlayerTurn(ai) || !ph.getPhase().isMain() || !game.getStack().isEmpty()) {
+            return false;
+        }
+        // magic-tools: rule 151, a ping tapper (Hawkeye's Bow on it) untaps the mana that untaps it
+        final Card pingTgt = forge.ai.TapPingLoopAi.pingTarget(ai, sa);
+        if (pingTgt != null) {
+            sa.resetTargets();
+            sa.getTargets().add(pingTgt);
+            return true;
+        }
+        List<SpellAbility> wanted = unpayableSpellsInHand(ai, null);
+        if (wanted.isEmpty()) {
+            return false;
+        }
+        CardCollection tapped = CardLists.filter(ai.getCardsIn(ZoneType.Battlefield), CardPredicates.TAPPED);
+        tapped = CardLists.getTargetableCards(tapped, sa);
+        tapped = CardLists.filter(tapped, c -> manaProducedBy(ai, c) > 0);
+        // le plus de mana d'abord ; un terrain enchanté (Wild Growth, Utopia Sprawl) donne un mana de plus
+        tapped.sort(java.util.Comparator.comparingInt((Card c) -> -(manaProducedBy(ai, c) + c.getEnchantedBy().size())));
+        for (Card c : tapped) {
+            c.setTapped(false);
+            try {
+                for (SpellAbility ab : wanted) {
+                    if (ComputerUtilMana.canPayManaCost(ab, ai, 0, false)) {
+                        sa.resetTargets();
+                        sa.getTargets().add(c);
+                        return true;
+                    }
+                }
+            } finally {
+                c.setTapped(true);
+            }
+        }
+        return false;
+    }
+
+    /** Sorts de la main (hors terrains et hors {@code except}) qu'on ne peut pas payer maintenant. */
+    private static List<SpellAbility> unpayableSpellsInHand(final Player ai, final Card except) {
+        List<SpellAbility> wanted = new java.util.ArrayList<>();
+        for (Card c : CardLists.filter(ai.getCardsIn(ZoneType.Hand), CardPredicates.NON_LANDS)) {
+            if (c == except) {
+                continue;
+            }
+            for (SpellAbility ab : c.getAllPossibleAbilities(ai, false)) {
+                ab.setActivatingPlayer(ai);
+                if (ab.isSpell() && ab.isBasicSpell() && ab.getPayCosts().getCostMana() != null
+                        && !ComputerUtilMana.canPayManaCost(ab, ai, 0, false)) {
+                    wanted.add(ab);
+                }
+            }
+        }
+        return wanted;
+    }
+
+    /**
+     * Vitalize (« dégagez toutes les créatures que vous contrôlez ») : en phase principale de l'IA, pile vide,
+     * seulement si, une fois ses créatures de mana engagées dégagées, un sort de la main qu'on ne peut pas payer
+     * maintenant devient payable en plus du coût de Vitalize (compté comme 1 mana générique en plus).
+     */
+    public static boolean doUntapAllManaLogic(final Player ai, final SpellAbility sa) {
+        final Game game = ai.getGame();
+        final PhaseHandler ph = game.getPhaseHandler();
+        if (!ph.isPlayerTurn(ai) || !ph.getPhase().isMain() || !game.getStack().isEmpty()) {
+            return false;
+        }
+        CardCollection tapped = CardLists.filter(ai.getCreaturesInPlay(), CardPredicates.TAPPED);
+        tapped = CardLists.filter(tapped, c -> manaProducedBy(ai, c) > 0);
+        if (tapped.isEmpty()) {
+            return false;
+        }
+        List<SpellAbility> wanted = unpayableSpellsInHand(ai, sa.getHostCard());
+        if (wanted.isEmpty()) {
+            return false;
+        }
+        for (Card c : tapped) {
+            c.setTapped(false);
+        }
+        try {
+            for (SpellAbility ab : wanted) {
+                if (ComputerUtilMana.canPayManaCost(ab, ai, sa.getPayCosts().getTotalMana().getCMC(), false)) {
+                    return true;
+                }
+            }
+        } finally {
+            for (Card c : tapped) {
+                c.setTapped(true);
+            }
+        }
+        return false;
+    }
+
+    /** Ordre de paiement d'un coût « renvoyer » pour UntapManaCreature : engagé d'abord, puis le moins de mana, puis le plus petit. */
+    public static CardCollection orderReturnPayment(final Player ai, final CardCollection list) {
+        CardCollection res = new CardCollection(list);
+        res.sort(java.util.Comparator.comparing(Card::isUntapped)
+                .thenComparingInt(c -> manaProducedBy(ai, c))
+                .thenComparingInt(Card::getNetPower));
+        return res;
+    }
+
+    private static String returnCostType(final SpellAbility sa) {
+        for (forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+            if (part instanceof forge.game.cost.CostReturn) {
+                return part.getType();
+            }
+        }
+        return "Permanent.YouCtrl";
+    }
+
+    private static int manaProducedBy(final Player ai, final Card c) {
+        int max = 0;
+        for (SpellAbility ma : c.getManaAbilities()) {
+            ma.setActivatingPlayer(ai);
+            if (ma.getPayCosts().hasManaCost()) {
+                continue;
+            }
+            max = Math.max(max, ma.amountOfManaGenerated(true));
+        }
+        return max;
     }
 
     private boolean doPoolExtraManaLogic(final Player ai, final SpellAbility sa) {

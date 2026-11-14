@@ -19,6 +19,12 @@ public class UntapAllAi extends SpellAbilityAi {
     protected AiAbilityDecision canPlay(Player aiPlayer, SpellAbility sa) {
         final Card source = sa.getHostCard();
 
+        // magic-tools : Vitalize, dégager ses créatures de mana pour lancer un sort de plus
+        if ("UntapManaCreatures".equals(sa.getParam("AILogic"))) {
+            return UntapAi.doUntapAllManaLogic(aiPlayer, sa)
+                    ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         final AbilitySub abSub = sa.getSubAbility();
         if (abSub != null) {
         	if (ApiType.AddPhase == abSub.getApi() 
@@ -46,7 +52,11 @@ public class UntapAllAi extends SpellAbilityAi {
             String valid = sa.getParam("ValidCards");
             CardCollectionView list = CardLists.filter(aiPlayer.getGame().getCardsIn(ZoneType.Battlefield), CardPredicates.TAPPED);
             list = CardLists.getValidCards(list, valid, source.getController(), source, sa);
-            return (mandatory || !list.isEmpty()) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            // magic-tools : untapping nothing is harmless (Deepway Navigator stayed in hand as BadEtbEffects),
+            // only refuse when it untaps opponents' permanents and none of ours
+            boolean onlyOpponents = !list.isEmpty()
+                    && !list.anyMatch(CardPredicates.isControlledByAnyOf(aiPlayer.getYourTeam()));
+            return (mandatory || !onlyOpponents) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
         return mandatory ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);

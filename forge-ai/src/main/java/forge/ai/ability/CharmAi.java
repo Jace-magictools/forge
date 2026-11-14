@@ -27,6 +27,18 @@ public class CharmAi extends SpellAbilityAi {
         final Card source = sa.getHostCard();
         List<AbilitySub> choices = CharmEffect.makePossibleOptions(sa);
 
+        // magic-tools: Rude Awakening, entwined only, for a lethal land attack
+        if (RudeAwakeningAi.applies(sa)) {
+            sa.setChosenList(null);
+            sa.setSubAbility(null);
+            if (!RudeAwakeningAi.shouldCast(ai, sa)) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+            sa.setChosenList(choices);
+            CharmEffect.chainAbilities(sa, choices);
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+
         final int num;
         final int min;
         if (sa.isEntwine()) {
@@ -43,6 +55,7 @@ public class CharmAi extends SpellAbilityAi {
         sa.setChosenList(null);
         sa.setSubAbility(null);
         List<AbilitySub> chosenList;
+        boolean landMode = false; // magic-tools: rule 279
 
         if (choiceForOpp) {
             // This branch is for "An Opponent chooses" Charm spells from Alliances
@@ -55,6 +68,8 @@ public class CharmAi extends SpellAbilityAi {
             if (num < choices.size()) {
                 Collections.shuffle(choices, MyRandom.getRandom());
             }
+            // magic-tools: rule 122, a willing counter mode is tried first
+            FlashCounter122.counterFirst(choices);
 
             /*
              * The generic chooseOptionsAi uses canPlayAi() to determine good choices
@@ -66,7 +81,19 @@ public class CharmAi extends SpellAbilityAi {
              * bonus choice(s) for the AI otherwise it might be too hard to ever fulfil
              * minimum choice requirements with canPlayAi() alone.
              */
-            chosenList = min > 1 ? chooseMultipleOptionsAi(sa, choices, ai, min)
+            // magic-tools: rule 120, a mana mode that lets us cast a spell from hand right now
+            AbilitySub manaMode = ManaCharm120.pick(ai, sa, choices, num);
+            // magic-tools: rule 200, healthy life: looking at cards rather than gaining life
+            if (manaMode == null) {
+                manaMode = LifeMode200.pick(ai, sa, choices, num);
+            }
+            // magic-tools: rule 279, put a land of the hand, or take back a land we can use (Gardien de la Forêt)
+            if (manaMode == null) {
+                manaMode = forge.ai.LandReplayAi.charmLandMode(ai, choices, num);
+                landMode = manaMode != null;
+            }
+            chosenList = manaMode != null ? Lists.newArrayList(manaMode)
+                    : min > 1 ? chooseMultipleOptionsAi(sa, choices, ai, min)
                     : chooseOptionsAi(sa, choices, ai, timingRight, num, min);
         }
 
@@ -101,6 +128,10 @@ public class CharmAi extends SpellAbilityAi {
             // TODO return lower score since the SA wouldn't be used to its full effectiveness
         }
 
+        if (landMode) {
+            // magic-tools: rule 279, a land put in or taken back is always worth it (no 80 % dice roll)
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         return super.checkApiLogic(ai, sa);
     }
 

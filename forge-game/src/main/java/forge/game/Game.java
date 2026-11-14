@@ -675,7 +675,33 @@ public class Game {
         }
     }
 
+    // PR Forge #11931 (adaptee) : les verifications d'effets statiques demandent les zones sources
+    // a chaque fois ; on garde la derniere reponse tant qu'aucune zone ne bouge (ni le nombre de joueurs)
+    private int zoneVersion;
+    private CardCollectionView staticSourceCards;
+    private int staticSourceCardsVersion = -1;
+    private int staticSourceCardsPlayers = -1;
+
+    public void bumpZoneVersion() {
+        zoneVersion++;
+    }
+
     public CardCollectionView getCardsIn(final Iterable<ZoneType> zones) {
+        if (zones == ZoneType.STATIC_ABILITIES_SOURCE_ZONES) {
+            final int players = getPlayers().size();
+            if (staticSourceCards != null && staticSourceCardsVersion == zoneVersion && staticSourceCardsPlayers == players) {
+                return staticSourceCards;
+            }
+            final int version = zoneVersion;
+            staticSourceCards = collectCardsIn(zones);
+            staticSourceCardsVersion = version;
+            staticSourceCardsPlayers = players;
+            return staticSourceCards;
+        }
+        return collectCardsIn(zones);
+    }
+
+    private CardCollectionView collectCardsIn(final Iterable<ZoneType> zones) {
         if (zones == null) {
             return CardCollection.EMPTY;
         }

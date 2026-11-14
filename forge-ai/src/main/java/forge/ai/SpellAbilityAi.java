@@ -11,6 +11,7 @@ import com.google.common.collect.Lists;
 import forge.card.ICardFace;
 import forge.card.mana.ManaCost;
 import forge.game.GameEntity;
+import forge.game.ability.ApiType;
 import forge.game.ability.SpellAbilityEffect;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
@@ -54,6 +55,13 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
     };
 
     public final AiAbilityDecision canPlayWithSubs(final Player aiPlayer, final SpellAbility sa) {
+        // magic-tools: rule 30, "each player loses, discards, sacrifices" chains are judged as a whole
+        if (SymmetricChainAi.applies(sa)) {
+            if (sa.getRestrictions() != null && !sa.getRestrictions().canPlay(sa.getHostCard(), sa)) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlaySa);
+            }
+            return SymmetricChainAi.decide(aiPlayer, sa);
+        }
         AiAbilityDecision decision = canPlay(aiPlayer, sa);
         if (!decision.willingToPlay() && !"PlayForSub".equals(sa.getParam("AILogic"))) {
             return decision;
@@ -81,6 +89,31 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
     private AiAbilityDecision canPlayWithoutRestrict(final Player ai, final SpellAbility sa) {
         final Card source = sa.getHostCard();
 
+        // magic-tools: a creature stolen until end of turn is about to go back, any harmless outlet may eat it now
+        // magic-tools: rule 116, same for a creature our own effect is about to sacrifice (unpaid echo, end step)
+        // magic-tools: rule 141, a free outlet whose sacrifices ping the opponent to death (Mayhem Devil + Woe Strider):
+        // the outlet's own effect does not matter, no dice roll (ScryAi plays only 40-67 % of the time)
+        if (AristocratAi.lethalOutlet(ai, sa)) {
+            if (!sa.usesTargeting()) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
+            final AiAbilityDecision ping = checkApiLogic(ai, sa);
+            if (ping.willingToPlay()) {
+                return ping;
+            }
+        }
+        // magic-tools: rule 243, a free outlet eats a creature that comes straight back and replays its enter trigger
+        if (!sa.usesTargeting() && SacRebuyAi.rebuys(ai, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        if (ThreatenSacAi.eatsStolenCreature(ai, sa) || OwnSacrificeAi.eatsDoomedCreature(ai, sa)
+                || SacRebuyAi.rebuys(ai, sa)) {
+            final AiAbilityDecision eat = checkApiLogic(ai, sa);
+            if (eat.willingToPlay()) {
+                return eat;
+            }
+        }
+
         if (sa.hasParam("AILogic")) {
             final String logic = sa.getParam("AILogic");
             final boolean alwaysOnDiscard = "AlwaysOnDiscard".equals(logic) && ai.getGame().getPhaseHandler().is(PhaseType.END_OF_TURN, ai)
@@ -93,7 +126,10 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
             }
         } else if (!checkPhaseRestrictions(ai, sa, ai.getGame().getPhaseHandler())) {
             return new AiAbilityDecision(0, AiPlayDecision.MissingPhaseRestrictions);
-        } else if (ComputerUtil.preventRunAwayActivations(sa)) {
+        } else if (ComputerUtil.preventRunAwayActivations(sa) && PersistLoopAi.millLoopCard(ai, sa) == null
+                && !UntapLoopAi.floatingPaysFor(ai, sa)
+                && !TapPingLoopAi.inLoop(ai, sa)) { // magic-tools: rule 148, tap-ping loop (its own cap) // magic-tools: rule 140, a finite pool from the loop shortcut is spent
+            // magic-tools: a mill loop (Altar of Dementia + Melira + Kitchen Finks) ends with the library, let it finish
             return new AiAbilityDecision(0, AiPlayDecision.StopRunawayActivations);
         }
 
@@ -179,6 +215,10 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
 
     public final boolean doTrigger(final Player aiPlayer, final SpellAbility sa, final boolean mandatory) {
         if (!mandatory && !(sa instanceof AbilitySub) && !ComputerUtilCost.canPayCost(sa, aiPlayer, true)) {
+            return false;
+        }
+        // magic-tools: rule 88, an optional trigger's mana does not take the mana of a spell in hand
+        if (!mandatory && !(sa instanceof AbilitySub) && TriggerManaKeepAi.keepsMana(aiPlayer, sa)) {
             return false;
         }
 
@@ -268,8 +308,36 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
      */
     public AiAbilityDecision chkDrawbackWithSubs(Player aiPlayer, AbilitySub ab) {
         final AbilitySub subAb = ab.getSubAbility();
+        // magic-tools: rule 124, a sub-ability that will not happen (Condition$ Kicked on an unkicked Jilt, no target
+        // required) does not veto the spell: the free Jilt of Isochron Scepter was always "TargetingFailed"
+        if (ab.usesTargeting() && ab.getMinTargets() == 0 && ab.getConditions() != null && !ab.metConditions()) {
+            return subAb == null ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : chkDrawbackWithSubs(aiPlayer, subAb);
+        }
         AiAbilityDecision decision = SpellApiToAi.Converter.get(ab).chkDrawback(aiPlayer, ab);
         if (!decision.willingToPlay()) {
+            // magic-tools: rule 128, an optional bonus ("up to one target creature", TargetMin 0) the AI finds no use for
+            // is left without target instead of vetoing the spell (Twisted Fealty was never cast, Mark of Mutiny was)
+            if (ab.usesTargeting() && ab.getMinTargets() == 0) {
+                ab.resetTargets();
+                return subAb == null ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : chkDrawbackWithSubs(aiPlayer, subAb);
+            }
+            // magic-tools: rule 132, a "you may" sub-ability (Optional$ True, chosen at resolution) never vetoes the spell:
+            // AttachAi refuses every non-trigger Attach sub, so Resolute Strike ("+2/+2, you may attach an Equipment")
+            // was never cast (tournament v19, Halvar: 42 times in hand, 0 cast)
+            if (!ab.usesTargeting() && ab.hasParam("Optional") && !ab.hasParam("UnlessCost")) {
+                return subAb == null ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : chkDrawbackWithSubs(aiPlayer, subAb);
+            }
+            // magic-tools: rule 178, a Proliferate sub-ability never vetoes the spell: proliferate chooses "any number" of
+            // permanents and players, none is fine. Drown in Ichor (-4/-4, then proliferate) was kept in hand 5 turns
+            // facing two creatures it kills, because nothing had a counter yet (tournament v215, Infection)
+            if (ab.getApi() == ApiType.Proliferate) {
+                return subAb == null ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : chkDrawbackWithSubs(aiPlayer, subAb);
+            }
+            // magic-tools: rule 231, a sub-ability under a condition that will not happen, or a sweep with nothing of ours
+            // to destroy, or an X that can stop under its threshold, does not veto the spell (White Sun's Twilight)
+            if (ConditionalSweepAi.excuses(aiPlayer, ab)) {
+                return subAb == null ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : chkDrawbackWithSubs(aiPlayer, subAb);
+            }
             return decision;
         }
 
@@ -442,6 +510,10 @@ public abstract class SpellAbilityAi extends SpellAbilityEffect {
                 }
             }
 
+            // magic-tools: rule 171, X is paid on top of the optional cost (Spell Burst: buyback 3 left X = 0)
+            if (fullCost.getTotalMana() != null && fullCost.getTotalMana().countX() > 0) {
+                fullCostSa.setXManaCostPaid(XCounterAi.xWanted(chosen));
+            }
             if (ComputerUtilCost.canPayCost(fullCostSa, payer, false)) {
                 chosenOptCosts.add(opt);
                 costSoFar.add(opt.getCost());

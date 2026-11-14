@@ -12,6 +12,11 @@ public class ChooseNumberAi extends SpellAbilityAi {
         String aiLogic = sa.getParamOrDefault("AILogic", "");
 
         if (aiLogic.isEmpty()) {
+            // magic-tools: a number chosen at random, or as the permanent enters (Haktos the Unscarred), is no reason
+            // to keep the card in hand: stock AI found no logic and refused the whole spell (BadEtbEffects)
+            if (sa.hasParam("Random") || (!sa.usesTargeting() && !sa.getHostCard().isInPlay())) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
             return new AiAbilityDecision(0, AiPlayDecision.MissingLogic);
         } else if (aiLogic.equals("SweepCreatures")) {
             int maxChoiceLimit = AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParam("Max"), sa);

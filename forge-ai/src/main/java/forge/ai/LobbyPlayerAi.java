@@ -34,9 +34,24 @@ public class LobbyPlayerAi extends LobbyPlayer implements IGameEntitiesFactory {
         this.rotateProfileEachGame = rotateProfileEachGame;
     }
 
+    /** magic-tools (09/11, essai B de tester) : FORGE_AI_SIM=full|hybrid passe l'IA en mode simulation de Forge
+     *  (elle essaie ses coups sur une copie de la partie avant de choisir) ; FORGE_AI_SIM_DECK=texte le limite
+     *  aux joueurs dont le nom contient ce texte (le nom du deck en mode sim). Sans variable : inchangé. */
+    static AIOption simulationMode(AIOption option, String name) {
+        String sim = System.getenv("FORGE_AI_SIM");
+        if (sim == null || sim.isEmpty()) {
+            return option;
+        }
+        String only = System.getenv("FORGE_AI_SIM_DECK");
+        if (only != null && !only.isEmpty() && (name == null || !name.contains(only))) {
+            return option;
+        }
+        return "hybrid".equalsIgnoreCase(sim) ? AIOption.USE_HYBRID_SIMULATION : AIOption.USE_FULL_SIMULATION;
+    }
+
     private PlayerControllerAi createControllerFor(Player ai) {
         PlayerControllerAi result = new PlayerControllerAi(ai.getGame(), ai, this);
-        result.getAi().setUseSimulation(option);
+        result.getAi().setUseSimulation(simulationMode(option, getName()));
         return result;
     }
 

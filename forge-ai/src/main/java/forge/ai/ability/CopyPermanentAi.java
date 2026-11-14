@@ -150,6 +150,13 @@ public class CopyPermanentAi extends SpellAbilityAi {
             } else if (!mandatory) {
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
+            // magic-tools: rule 185, a legendary copy of a name we already control dies to the legend rule
+            betterList = CardLists.filter(list, c -> !LegendCopyAi.diesToLegendRule(aiPlayer, sa, c));
+            if (!betterList.isEmpty()) {
+                list = betterList;
+            } else if (!mandatory) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
 
             // Saheeli Rai + Felidar Guardian combo support
             if ("Saheeli Rai".equals(sourceName)) {
@@ -253,7 +260,8 @@ public class CopyPermanentAi extends SpellAbilityAi {
         final boolean canCopyLegendary = sa.hasParam("NonLegendary");
         final String filter = canCopyLegendary ? "Permanent" : "Permanent.YouDontCtrl,Permanent.nonLegendary";
         // TODO add filter to not select Legendary from Other Player when ai already have a Legendary with that name
-        return CardLists.getValidCards(options, filter, ctrl, host, sa);
+        // magic-tools: rule 185, nor a legendary we already control under that name
+        return CardLists.filter(CardLists.getValidCards(options, filter, ctrl, host, sa), c -> !LegendCopyAi.diesToLegendRule(ai, sa, c));
     }
 
     @Override

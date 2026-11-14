@@ -1,0 +1,14 @@
+Name:Võx, Child of the Collective
+ManaCost:4 U
+Types:Legendary Artifact Creature Borg
+PT:3/3
+T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigEffectArt | TriggerDescription$ When NICKNAME enters and at the beginning of your first main phase, the next artifact creature spell and the next Spacecraft spell you cast this turn have undaunted. (They cost {1} less to cast for each opponent.)
+T:Mode$ Phase | Phase$ Main1 | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigEffectArt | Secondary$ True | TriggerDescription$ When NICKNAME enters and at the beginning of your first main phase, the next artifact creature spell and the next Spacecraft spell you cast this turn have undaunted. (They cost {1} less to cast for each opponent.)
+SVar:TrigEffectArt:DB$ Effect | Name$ Võx Artifact Creature Undaunted | EffectOwner$ You | StaticAbilities$ STArtUndaunted | Triggers$ TrigCastArt | SubAbility$ DBEffectSpace
+SVar:STArtUndaunted:Mode$ Continuous | EffectZone$ Command | Affected$ Artifact.Creature+YouOwn | AffectedZone$ Hand,Library,Graveyard,Exile,Command,Stack | AddKeyword$ Undaunted | Description$ The next artifact creature spell you cast this turn has undaunted.
+SVar:TrigCastArt:Mode$ SpellCast | ValidCard$ Artifact.Creature | ValidActivatingPlayer$ You | TriggerZones$ Command | Execute$ DBExileEffect | Static$ True
+SVar:DBEffectSpace:DB$ Effect | Name$ Võx Spacecraft Undaunted | EffectOwner$ You | StaticAbilities$ STSpaceUndaunted | Triggers$ TrigCastSpace
+SVar:STSpaceUndaunted:Mode$ Continuous | EffectZone$ Command | Affected$ Spacecraft.YouOwn | AffectedZone$ Hand,Library,Graveyard,Exile,Command,Stack | AddKeyword$ Undaunted | Description$ The next Spacecraft spell you cast this turn has undaunted.
+SVar:TrigCastSpace:Mode$ SpellCast | ValidCard$ Spacecraft | ValidActivatingPlayer$ You | TriggerZones$ Command | Execute$ DBExileEffect | Static$ True
+SVar:DBExileEffect:DB$ ChangeZone | Origin$ Command | Destination$ Exile | Defined$ Self
+Oracle:When Võx enters and at the beginning of your first main phase, the next artifact creature spell and the next Spacecraft spell you cast this turn have undaunted. (They cost {1} less to cast for each opponent.)

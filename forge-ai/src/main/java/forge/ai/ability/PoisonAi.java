@@ -75,8 +75,10 @@ public class PoisonAi extends SpellAbilityAi {
             } else if (!players.contains(ai)) {
                 result = true;
             } else {
-                Player max = players.max(PlayerPredicates.compareByPoison());
-                result = ai.getPoisonCounters() != max.getPoisonCounters();
+                // magic-tools: rule 220, a counter shared by every player only matters if it finishes the AI off;
+                // the old test refused the tie, 0-0 included, and Ichor Rats stayed in hand all game (BadEtbEffects)
+                int num = AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParamOrDefault("Num", "1"), sa);
+                result = ai.cantLoseCheck(GameLossReason.Poisoned) || ai.getPoisonCounters() + num < 10;
             }
         }
         return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);

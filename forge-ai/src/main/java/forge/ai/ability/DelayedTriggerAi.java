@@ -37,6 +37,10 @@ public class DelayedTriggerAi extends SpellAbilityAi {
 
     @Override
     protected AiAbilityDecision doTriggerNoCost(Player ai, SpellAbility sa, boolean mandatory) {
+        if (Rescue121.isRescue(sa)) {
+            // magic-tools: rule 138, forced rescue mode names our best creature
+            return Rescue121.decideTrigger(ai, sa, mandatory);
+        }
         SpellAbility trigsa = sa.getAdditionalAbility("Execute");
         if (trigsa == null) {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
@@ -137,6 +141,9 @@ public class DelayedTriggerAi extends SpellAbilityAi {
             }
 
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        } else if (Rescue121.isRescue(sa)) {
+            // magic-tools: rule 121, "when that creature dies this turn, return it" = SaveCreature
+            return Rescue121.decide(ai, sa);
         } else if (logic.equals("SaveCreature")) {
             CardCollection ownCreatures = ai.getCreaturesInPlay();
 

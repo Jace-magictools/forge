@@ -164,7 +164,11 @@ public abstract class TapAiBase extends SpellAbilityAi {
                 if (!attackers.isEmpty() && !creatureList.isEmpty()) {
                     choice = ComputerUtilCard.getBestCreatureAI(creatureList);
                 } else if (sa.isTrigger() || ComputerUtil.castSpellInMain1(ai, sa)) {
-                    choice = ComputerUtilCard.getMostExpensivePermanentAI(tapList);
+                    // magic-tools: rule 306, a lock ("doesn't untap") takes the creature that weighs most
+                    choice = TapLock306Ai.choose(ai, sa, tapList);
+                    if (choice == null) {
+                        choice = ComputerUtilCard.getMostExpensivePermanentAI(tapList);
+                    }
                 }
             } else if (phase.isPlayerTurn(opp)
                     && phase.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS)) {
@@ -176,7 +180,11 @@ public abstract class TapAiBase extends SpellAbilityAi {
                     choice = ComputerUtilCard.getMostExpensivePermanentAI(tapList);
                 }
             } else {
-                choice = ComputerUtilCard.getMostExpensivePermanentAI(tapList);
+                // magic-tools: rule 306, a lock ("doesn't untap") takes the creature that weighs most
+                choice = TapLock306Ai.choose(ai, sa, tapList);
+                if (choice == null) {
+                    choice = ComputerUtilCard.getMostExpensivePermanentAI(tapList);
+                }
             }
 
             if (choice == null) { // can't find anything left

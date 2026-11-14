@@ -184,7 +184,7 @@ public class ComputerUtilCombat {
 
             damage += predictPowerBonusOfAttacker(attacker, null, combat, withoutAbilities);
             sum = predictDamageTo(attacked, damage, attacker, true);
-            if (attacker.hasDoubleStrike()) {
+            if (AttackStrike255.hasDoubleStrike(attacker)) {
                 sum *= 2;
             }
         }
@@ -215,7 +215,7 @@ public class ComputerUtilCombat {
             // opponent can always order it so that he gets 0
             if (pd > 1 || !attacker.getController().getOpponents().getCardsIn(ZoneType.Battlefield).anyMatch(CardPredicates.nameEquals("Vorinclex, Monstrous Raider"))) {
                 poison = pd;
-                if (attacker.hasDoubleStrike()) {
+                if (AttackStrike255.hasDoubleStrike(attacker)) {
                     poison *= 2;
                 }
             }
@@ -1699,7 +1699,8 @@ public class ComputerUtilCombat {
             }
         } // flanking
 
-        if (((attacker.hasKeyword(Keyword.INDESTRUCTIBLE) || (!withoutAbilities && ComputerUtil.canRegenerate(ai, attacker)))
+        if (((attacker.hasKeyword(Keyword.INDESTRUCTIBLE) || (!withoutAbilities && (ComputerUtil.canRegenerate(ai, attacker)
+                || SelfIndestructibleAi.canSelfIndestructible(attacker)))) // magic-tools rule 161
                 && !(blocker.isWitherDamage()))
                 || (attacker.hasKeyword(Keyword.PERSIST) && !attacker.canReceiveCounters(CounterEnumType.M1M1) && (attacker
                         .getCounters(CounterEnumType.M1M1) == 0))
@@ -1755,7 +1756,7 @@ public class ComputerUtilCombat {
             }
 
             // Attacker may kill the blocker before he can deal normal (secondary) damage
-            if (dealsFirstStrikeDamage(attacker, withoutAbilities, combat)
+            if ((dealsFirstStrikeDamage(attacker, withoutAbilities, combat) || AttackStrike255.hasFirstStrike(attacker))
                     && !blocker.hasKeyword(Keyword.INDESTRUCTIBLE)) {
                 if (attackerDamage >= defenderLife) {
                     return false;
@@ -1770,7 +1771,7 @@ public class ComputerUtilCombat {
         } // defender double strike
         else { // no double strike for defender
                // Attacker may kill the blocker before he can deal any damage
-            if (dealsFirstStrikeDamage(attacker, withoutAbilities, combat)
+            if ((dealsFirstStrikeDamage(attacker, withoutAbilities, combat) || AttackStrike255.hasFirstStrike(attacker))
                     && !blocker.hasKeyword(Keyword.INDESTRUCTIBLE)
                     && !dealsFirstStrikeDamage(blocker, withoutAbilities, combat)) {
                 if (attackerDamage >= defenderLife) {
@@ -1912,7 +1913,8 @@ public class ComputerUtilCombat {
     		return true;
     	}
 
-        if (((blocker.hasKeyword(Keyword.INDESTRUCTIBLE) || (!withoutAbilities && ComputerUtil.canRegenerate(ai, blocker)))
+        if (((blocker.hasKeyword(Keyword.INDESTRUCTIBLE) || (!withoutAbilities && (ComputerUtil.canRegenerate(ai, blocker)
+                || SelfIndestructibleAi.canSelfIndestructible(blocker)))) // magic-tools rule 161
                 && !attacker.isWitherDamage())
                 || (blocker.hasKeyword(Keyword.PERSIST) && !blocker.canReceiveCounters(CounterEnumType.M1M1) && blocker
                         .getCounters(CounterEnumType.M1M1) == 0)
@@ -1975,7 +1977,7 @@ public class ComputerUtilCombat {
                 + predictToughnessBonusOfAttacker(attacker, blocker, combat, withoutAbilities, withoutAttackerStaticAbilities);
 
         // AI should be less worried about deathtouch
-        if (attacker.hasDoubleStrike()) {
+        if (AttackStrike255.hasDoubleStrike(attacker)) {
             if (attackerDamage >= defenderLife) {
                 return true;
             }
@@ -2002,7 +2004,7 @@ public class ComputerUtilCombat {
                // Defender may kill the attacker before he can deal any damage
             if (dealsFirstStrikeDamage(blocker, withoutAbilities, combat)
                     && !attacker.hasKeyword(Keyword.INDESTRUCTIBLE)
-                    && !dealsFirstStrikeDamage(attacker, withoutAbilities, combat)) {
+                    && !dealsFirstStrikeDamage(attacker, withoutAbilities, combat) && !AttackStrike255.hasFirstStrike(attacker)) {
 
                 if (defenderDamage >= attackerLife) {
                     return false;
@@ -2267,7 +2269,7 @@ public class ComputerUtilCombat {
     // cached per AI decision (AiCache is cleared in chooseSpellAbilityToPlay);
     // predictions ask this once per attacker otherwise
     private static Boolean isCombatDamagePreventedThisTurnCached(final Game game) {
-        return AiCache.getCached("isPreventCombatDamageThisTurn",
+        return AiCache.getCached(AiCache.Scope.PRIORITY, "isPreventCombatDamageThisTurn",
                 () -> game.getReplacementHandler().isPreventCombatDamageThisTurn(),
                 List.of(AiCache::identity), game);
     }
@@ -2564,7 +2566,7 @@ public class ComputerUtilCombat {
             // intern toxic effect
             poison += attacker.getKeywordMagnitude(Keyword.TOXIC);
         }
-        if (attacker.hasDoubleStrike()) {
+        if (AttackStrike255.hasDoubleStrike(attacker)) {
             poison *= 2;
         }
         return poison;
@@ -2588,7 +2590,7 @@ public class ComputerUtilCombat {
                 if (p instanceof Player p1 && !ComputerUtilCard.canBeBlockedProfitably(p1, attacker, true)) {
                     return p;
                 }
-                if (p instanceof Card card && !ComputerUtilCard.canBeBlockedProfitably(card.getController(), attacker, true)) {
+                if (p instanceof Card card && !ComputerUtilCard.canBeBlockedProfitably(card.isBattle() ? card.getProtectingPlayer() : card.getController(), attacker, true)) {
                     return p;
                 }
             }
