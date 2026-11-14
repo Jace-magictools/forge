@@ -1,0 +1,17 @@
+Name:Borg Cube
+ManaCost:5 W B
+Types:Artifact Spacecraft
+PT:6/6
+K:Affinity:Creature.Artifact:artifact creatures
+T:Mode$ ChangesZone | Origin$ Any | Destination$ Battlefield | ValidCard$ Card.Self | Execute$ TrigBranch | TriggerDescription$ Whenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. If you can't, exile up to one target creature. (To assimilate a card, put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)
+T:Mode$ Attacks | ValidCard$ Card.Self | Execute$ TrigBranch | Secondary$ True | TriggerDescription$ Whenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. If you can't, exile up to one target creature.
+SVar:TrigBranch:DB$ Branch | BranchConditionSVar$ X | BranchConditionSVarCompare$ GE1 | TrueSubAbility$ DBAssimilate | FalseSubAbility$ DBExile
+SVar:X:Count$ValidExile Creature.IsImprinted
+SVar:DBAssimilate:DB$ ChangeZone | Hidden$ True | Origin$ Exile | Destination$ Battlefield | ChangeType$ Creature.IsImprinted | ChangeNum$ 1 | Mandatory$ True | GainControl$ True | WithCountersType$ P1P1 | RememberChanged$ True | SubAbility$ DBAnimate
+SVar:DBAnimate:DB$ Animate | Defined$ Remembered | Types$ Artifact,Creature,Borg | RemoveCreatureTypes$ True | Duration$ Permanent | SubAbility$ DBCleanup
+SVar:DBExile:DB$ ChangeZone | ValidTgts$ Creature | TargetMin$ 0 | TargetMax$ 1 | Origin$ Battlefield | Destination$ Exile | Imprint$ True
+SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True
+K:Station:12
+S:Mode$ Continuous | AffectedDefined$ Self | Affected$ Card.counters_GE12_CHARGE | AddType$ Creature | AddStaticAbility$ BorgFlying | Description$ STATION 12+ Artifact creatures you control have flying.
+SVar:BorgFlying:Mode$ Continuous | Affected$ Artifact.Creature+YouCtrl | AddKeyword$ Flying | Description$ Artifact creatures you control have flying.
+Oracle:Affinity for artifact creatures\nWhenever this Spacecraft enters or attacks, assimilate a creature card exiled with it. If you can't, exile up to one target creature. (To assimilate a card, put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)\nStation (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery. It's an artifact creature at 12+.)\nSTATION 12+\nArtifact creatures you control have flying.
