@@ -3,6 +3,7 @@ package forge.ai.ability;
 import forge.ai.*;
 import forge.game.Game;
 import forge.game.ability.AbilityUtils;
+import forge.game.ability.ApiType;
 import forge.game.card.*;
 import forge.game.cost.Cost;
 import forge.game.phase.PhaseType;
@@ -69,6 +70,13 @@ public class ChangeZoneAllAi extends SpellAbilityAi {
         if ("LivingDeath".equals(aiLogic)) {
             return SpecialCardAi.LivingDeath.consider(ai, sa);
         } else if ("Timetwister".equals(aiLogic)) {
+            return SpecialCardAi.Timetwister.consider(ai, sa);
+        } else if (aiLogic.isEmpty() && isWheel(ai, sa, origin)) {
+            // magic-tools: rule 95, Memory Jar and the like (each player sets its hand aside and draws seven)
+            // are judged like Timetwister: when our hand is small or far behind the opponent's
+            if (isTemporaryWheel(sa)) {
+                return considerTemporaryWheel(ai);
+            }
             return SpecialCardAi.Timetwister.consider(ai, sa);
         } else if ("RetDiscardedThisTurn".equals(aiLogic)) {
             boolean result = !ai.getDiscardedThisTurn().isEmpty() && ai.getGame().getPhaseHandler().is(PhaseType.END_OF_TURN);
@@ -234,6 +242,45 @@ public class ChangeZoneAllAi extends SpellAbilityAi {
         }
         boolean result = ((MyRandom.getRandom().nextFloat() < .8) || sa.isTrigger()) && chance;
         return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+    }
+
+    /** magic-tools: rule 95, our whole hand leaves and a later part makes us draw several cards. */
+    static boolean isWheel(final Player ai, final SpellAbility sa, final ZoneType origin) {
+        if (origin != ZoneType.Hand || sa.usesTargeting() || !"Card".equals(sa.getParam("ChangeType"))) {
+            return false;
+        }
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getApi() == ApiType.Draw && !sub.usesTargeting()) {
+                final String num = sub.getParamOrDefault("NumCards", "1");
+                return num.matches("\\d+") && Integer.parseInt(num) >= 5
+                        && AbilityUtils.getDefinedPlayers(sa.getHostCard(), sub.getParam("Defined"), sub).contains(ai);
+            }
+        }
+        return false;
+    }
+
+    /** magic-tools: rule 228, the hand set aside comes back at a later end step (Memory Jar): nothing is lost. */
+    static boolean isTemporaryWheel(final SpellAbility sa) {
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getApi() == ApiType.DelayedTrigger) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * magic-tools: rule 228, at the opponent's end step the "next end step" is ours: a whole turn with seven more
+     * cards and all our mana, while the opponent only keeps instants. At any other time the opponent gets the better
+     * part (Memory Jar fired during their turn gives them seven cards for what remains of it).
+     */
+    private static AiAbilityDecision considerTemporaryWheel(final Player ai) {
+        final forge.game.phase.PhaseHandler ph = ai.getGame().getPhaseHandler();
+        if (!ph.is(PhaseType.END_OF_TURN) || ph.isPlayerTurn(ai)
+                || ai.getLandsInPlay().size() < 3 || ai.getCardsIn(ZoneType.Library).size() <= 8) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+        return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
     }
 
     /**

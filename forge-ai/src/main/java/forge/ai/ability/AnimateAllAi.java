@@ -14,6 +14,11 @@ public class AnimateAllAi extends SpellAbilityAi {
     protected AiAbilityDecision canPlay(Player aiPlayer, SpellAbility sa) {
         String logic = sa.getParamOrDefault("AILogic", "");
 
+        // magic-tools: rule 240, "all creatures lose indestructible" prepares a sweep: the sweep decides
+        if (forge.ai.MassBehindHead240.applies(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+
         if ("CreatureAdvantage".equals(logic) && !aiPlayer.getCreaturesInPlay().isEmpty()) {
             // TODO: improve this or implement a better logic for abilities like Oko, the Trickster ultimate
             for (Card c : aiPlayer.getCreaturesInPlay()) {

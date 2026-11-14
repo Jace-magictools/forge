@@ -1,5 +1,8 @@
 package forge.ai.ability;
 
+import forge.ai.TapPingLoopAi;
+import forge.ai.UntapManaAi;
+
 import forge.ai.*;
 import forge.card.ColorSet;
 import forge.card.MagicColor;
@@ -52,6 +55,18 @@ public class ManaAi extends SpellAbilityAi {
      */
     @Override
     protected boolean checkPhaseRestrictions(Player ai, SpellAbility sa, PhaseHandler ph) {
+        // magic-tools: Signets and filter lands, see ManaFilterAi (rule 166: and mana abilities that use the stack)
+        if (ManaFilterAi.isFilterOrStackSource(sa)) {
+            return ManaFilterAi.phaseOk(ai, ph);
+        }
+        // magic-tools: rule 146, a land an untapper will untap is tapped in either main phase (UntapManaAi)
+        if (UntapManaAi.phaseFits(ai, sa)) {
+            return true;
+        }
+        // magic-tools: rule 148, a mana source whose tapping hurts the opponents and whose mana untaps it (TapPingLoopAi)
+        if (TapPingLoopAi.phaseFits(ai, sa)) {
+            return true;
+        }
         if (improvesPosition(ai, sa)) {
             return true;
         }
@@ -91,6 +106,20 @@ public class ManaAi extends SpellAbilityAi {
     protected AiAbilityDecision checkApiLogic(Player ai, SpellAbility sa) {
         if (sa.hasParam("AILogic")) {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay); // handled elsewhere, does not meet the standard requirements
+        }
+
+        // magic-tools: rule 146, tap a land an untapper will untap: its mana floats for a cost one land short
+        if (UntapManaAi.shouldFloat(ai, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 148, tap-ping loop (Hawkeye's Bow + Pemmin's Aura on a mana creature)
+        if (TapPingLoopAi.shouldTap(ai, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+
+        if (ManaFilterAi.isFilterOrStackSource(sa)) {
+            return ManaFilterAi.shouldActivate(ai, sa) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
         // TODO check if it would be worth it to keep mana open for opponents turn anyway
@@ -143,6 +172,11 @@ public class ManaAi extends SpellAbilityAi {
             if (fromTrigger) {
                 return true;
             }
+        }
+
+        // magic-tools: rule 139, ritual first when Entomb + a reanimation spell fit only with its surplus
+        if (Entomb139.ritualForEntomb(ai, sa)) {
+            return true;
         }
 
         CardCollection manaSources = ComputerUtilMana.getAvailableManaSources(ai, true);

@@ -57,13 +57,22 @@ public class  DamageAllAi extends SpellAbilityAi {
                 best_x = bestOpp.getLife();
             } else {
                 // see if it's possible to get value from killing off creatures
-                for (int i = 0; i <= x; i++) {
+                // magic-tools: rule 142, a "discard X cards" cost caps X at the cards the AI agrees to discard
+                // (tournament v23, Profanation: X = 2 killed more, one fatty to discard, the spell was refused
+                // every turn instead of X = 1 putting Griselbrand in the graveyard for Animate Dead)
+                final int xMax = Math.min(x, payableDiscardX(ai, sa));
+                for (int i = 0; i <= xMax; i++) {
                     final int value = evaluateDamageAll(ai, sa, source, i);
                     if (value > best) {
                         best = value;
                         best_x = i;
                     }
                 }
+            }
+
+            if (best_x <= 0 && x >= 1 && reanimatorDiscardIsSafe(ai, sa, source)) {
+                // Sickening Dreams: discard the fatty for X = 1, then reanimate it
+                best_x = 1;
             }
 
             if (best_x > 0) {
@@ -74,6 +83,50 @@ public class  DamageAllAi extends SpellAbilityAi {
             }
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
+    }
+
+    /**
+     * magic-tools: rule 142. With a "discard X cards" cost, the number of cards the AI would discard
+     * (ComputerUtil.getCardPreference, as checkDiscardCost does); no such cost: no cap.
+     */
+    static int payableDiscardX(final Player ai, final SpellAbility sa) {
+        if (sa.getPayCosts() == null) {
+            return Integer.MAX_VALUE;
+        }
+        final Card source = sa.getHostCard();
+        for (final forge.game.cost.CostPart part : sa.getPayCosts().getCostParts()) {
+            if (part instanceof forge.game.cost.CostDiscard disc && "X".equals(disc.getAmount())) {
+                CardCollection hand = new CardCollection(ai.getCardsIn(ZoneType.Hand));
+                hand.remove(source);
+                if (disc.getType().equals("Hand")) {
+                    return Integer.MAX_VALUE;
+                }
+                CardCollection typeList = CardLists.getValidCards(hand, disc.getType(), ai, source, sa);
+                int n = 0;
+                for (int guard = typeList.size(); guard > 0; guard--) {
+                    Card pref = ComputerUtil.getCardPreference(ai, source, "DiscardCost", typeList);
+                    if (pref == null || !typeList.remove(pref)) {
+                        break;
+                    }
+                    n++;
+                }
+                return n;
+            }
+        }
+        return Integer.MAX_VALUE;
+    }
+
+    /** X = 1 to discard a creature worth reanimating, as long as the AI survives and loses no more than the opponent. */
+    private boolean reanimatorDiscardIsSafe(Player ai, SpellAbility sa, Card source) {
+        if (!ReanimatorAi.wantsDiscardForReanimation(ai, sa)) {
+            return false;
+        }
+        if (ai.getLife() <= ComputerUtilCombat.predictDamageTo(ai, 1, source, false) + 1) {
+            return false;
+        }
+        final Player opp = ai.getWeakestOpponent();
+        return ComputerUtilCard.evaluateCreatureList(getKillableCreatures(sa, opp, 1))
+                >= ComputerUtilCard.evaluateCreatureList(getKillableCreatures(sa, ai, 1));
     }
 
     private Player determineOppToKill(Player ai, SpellAbility sa, Card source, int x) {
@@ -175,6 +228,11 @@ public class  DamageAllAi extends SpellAbilityAi {
 
     @Override
     public AiAbilityDecision chkDrawback(Player ai, SpellAbility sa) {
+        // magic-tools: rule 240, the sweep is the whole spell (Hour of Devastation): full judgement, not the lenient
+        // drawback check that says yes on an empty board
+        if (forge.ai.MassBehindHead240.applies(sa.getRootAbility())) {
+            return checkApiLogic(ai, sa);
+        }
         final Card source = sa.getHostCard();
         final String validP = sa.getParamOrDefault("ValidPlayers", "");
 

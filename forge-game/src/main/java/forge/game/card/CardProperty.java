@@ -4,6 +4,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import forge.StaticData;
 import forge.card.CardDb;
+import forge.card.CardType;
 import forge.card.ColorSet;
 import forge.card.MagicColor;
 import forge.card.mana.ManaCost;
@@ -53,6 +54,28 @@ public class CardProperty {
             } else {
                 return false;
             }
+        }
+
+        // a bare core type or supertype only ends at the type check at the bottom
+        if (CardType.isACardType(property) || CardType.isASupertype(property)) {
+            return card.getCurrentState().getTypeWithChanges().hasStringType(property);
+        }
+
+        // perf (31/10) : the most frequent exact properties in our games skip the chain below, same result as their branch
+        // (Self 3,5 M calls on 96 games, YouCtrl, Other, attacking, YouOwn, token, OppCtrl ; no earlier branch matches them)
+        switch (property) {
+            case "Self": return card.equals(source);
+            case "YouCtrl": return controller.equals(sourceController);
+            case "Other": return !card.equals(source);
+            case "YouOwn": return card.getOwner().equals(sourceController);
+            case "OppCtrl": return controller.getOpponents().contains(sourceController);
+            case "token": return card.isToken() || card.isTokenCard();
+            case "attacking": return combat != null && card.isAttacking();
+            default: break;
+        }
+        // a creature type matches no branch of the chain : straight to the card state (checked on all 341 types)
+        if (CardType.isACreatureType(property)) {
+            return card.getCurrentState().hasProperty(property, sourceController, source, spellAbility);
         }
 
         if (property.equals("noName")) {

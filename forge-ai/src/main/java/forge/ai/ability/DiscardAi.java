@@ -115,7 +115,9 @@ public class DiscardAi extends SpellAbilityAi {
 
         // Don't use discard abilities before main 2 if possible
         if (ai.getGame().getPhaseHandler().getPhase().isBefore(PhaseType.MAIN2)
-                && !sa.hasParam("ActivationPhases") && !aiLogic.startsWith("AnyPhase")) {
+                && !sa.hasParam("ActivationPhases") && !aiLogic.startsWith("AnyPhase")
+                && !forge.ai.DiscardChoiceAi.castBeforeAttack(ai, sa) // magic-tools: rule 84
+                && !forge.ai.DiscardChoiceAi.isWheelSpell(ai, sa)) { // magic-tools: rule 229
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 

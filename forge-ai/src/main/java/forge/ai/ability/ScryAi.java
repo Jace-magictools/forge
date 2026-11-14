@@ -101,7 +101,8 @@ public class ScryAi extends SpellAbilityAi {
         // in the playerturn Scry should only be done in Main1 or in upkeep if able
         if (ph.isPlayerTurn(ai)) {
             if (isSorcerySpeed(sa, ai)) {
-                return ph.is(PhaseType.MAIN1) || sa.isPwAbility();
+                // magic-tools: rule 218, a scry spell refused in main 1 still gets its chance with the mana left in main 2
+                return ph.is(PhaseType.MAIN1) || sa.isPwAbility() || (sa.isSpell() && ph.is(PhaseType.MAIN2));
             } else {
                 return ph.is(PhaseType.UPKEEP);
             }
@@ -156,6 +157,13 @@ public class ScryAi extends SpellAbilityAi {
         boolean randomReturn = MyRandom.getRandom().nextFloat() <= chance;
 
         if (playReusable(ai, sa)) {
+            randomReturn = true;
+        }
+
+        // magic-tools: rule 218 (relevé « mana perdu » v251, merfolk - elfe t10-16 : Elven Farsight gardé quatre tours avec
+        // 13 mana libres) : the spell in hand was left to the dice each turn, even with nothing else to pay for.
+        // In main 2 the mana is spare (everything else had its chance), so the spell is cast
+        if (sa.isSpell() && isSorcerySpeed(sa, ai) && ai.getGame().getPhaseHandler().is(PhaseType.MAIN2, ai)) {
             randomReturn = true;
         }
 

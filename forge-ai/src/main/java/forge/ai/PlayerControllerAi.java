@@ -70,6 +70,12 @@ public class PlayerControllerAi extends PlayerController {
         return pilotsNonAggroDeck;
     }
 
+    /** Whether the board is wide enough for this AI's profile to let expensive evaluations take approximate shortcuts. */
+    public boolean takesShortcuts() {
+        final int threshold = brains.getIntProperty(AiProps.SHORTCUT_MIN_CREATURES);
+        return threshold >= 0 && CardLists.count(getGame().getCardsIn(ZoneType.Battlefield), CardPredicates.CREATURES) >= threshold;
+    }
+
     public void setupAutoProfile(Deck deck) {
         pilotsNonAggroDeck = deck.getName().contains("Control") || deck.getAverageCMC() > 3;
     }
@@ -427,10 +433,21 @@ public class PlayerControllerAi extends PlayerController {
             subtc = sub.getTargets();
             sub.resetTargets();
         }
+        // magic-tools: rule 279, CharmAi.checkApiLogic resets the chosen modes and the chained sub-ability: the modes
+        // already chosen when the trigger went on the stack are kept, or the confirmed trigger resolves to nothing
+        // (Gardien de la Forêt, "<take no action>")
+        final boolean keepModes = sa.getApi() == forge.game.ability.ApiType.Charm && sa.getChosenList() != null
+                && NewAi.on(player, 279);
+        final List<AbilitySub> chosenModes = keepModes ? sa.getChosenList() : null;
+        final AbilitySub chainedModes = keepModes ? sa.getSubAbility() : null;
         // There is no way this doTrigger here will have the same target as stored above
         // So it's possible it's making a different decision here than will actually happen
         if (!brains.doTrigger(sa, false)) {
             ret = false;
+        }
+        if (keepModes) {
+            sa.setChosenList(chosenModes);
+            sa.setSubAbility(chainedModes);
         }
         if (storeChoices) {
             sa.resetTargets();
@@ -771,7 +788,9 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn)  {
-        return !ComputerUtil.wantMulligan(player, cardsToReturn);
+        final boolean keep = !ComputerUtil.wantMulligan(player, cardsToReturn);
+        DecisionDump.mulligan(player, cardsToReturn, keep); // magic-tools: essai Claude arbitre, sans effet sur le jeu
+        return keep;
     }
 
     @Override
@@ -797,6 +816,20 @@ public class PlayerControllerAi extends PlayerController {
                 continue;
             }
 
+            // magic-tools, règle 91: short of lands, put back a tutor-to-top or the dearest spell, keep cheap mana
+            if (numLandsInHand < numLandsDesired) {
+                // magic-tools: rule 274, the plan's key cards stay in the hand when another card can go back
+                CardCollection spare = DeckPlanAi.spareForTuck(player, CardLists.filter(hand, c -> !c.isLand() && !toReturn.contains(c)));
+                Card dud = spare == null ? null : MulliganAi.tuckWhenShort(spare, toReturn);
+                if (dud == null) {
+                    dud = MulliganAi.tuckWhenShort(hand, toReturn);
+                }
+                if (dud != null) {
+                    toReturn.add(dud);
+                    continue;
+                }
+            }
+
             // See if we'd scry something to the bottom in this situation. If we want to, probably get rid of it.
             CardCollection scryBottom = new CardCollection();
             for (Card c : hand) {
@@ -806,13 +839,18 @@ public class PlayerControllerAi extends PlayerController {
                 }
             }
             if (!scryBottom.isEmpty()) {
+                CardCollection spareScry = DeckPlanAi.spareForTuck(player, scryBottom); // magic-tools: rule 274
+                if (spareScry != null) {
+                    scryBottom = spareScry;
+                }
                 CardLists.sortByCmcDesc(scryBottom);
                 toReturn.add(scryBottom.getFirst()); // assume the max CMC one is worse since we're not guaranteed to have lands for it
                 continue;
             }
 
             // If we don't want to scry anything to the bottom, remove the worst card that we have in order to satisfy the requirement
-            toReturn.add(ComputerUtilCard.getWorstAI(hand));
+            CardCollection spareWorst = DeckPlanAi.spareForTuck(player, CardLists.filter(hand, c -> !toReturn.contains(c))); // magic-tools: rule 274
+            toReturn.add(ComputerUtilCard.getWorstAI(spareWorst != null ? spareWorst : hand));
         }
 
         return CardCollection.getView(toReturn);
@@ -820,17 +858,22 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public void declareAttackers(Player attacker, Combat combat) {
+        final List<Card> dumpPotential = DecisionDump.potentialAttackers(attacker); // magic-tools: essai Claude arbitre
         brains.declareAttackers(attacker, combat);
+        DecisionDump.attack(attacker, combat, dumpPotential);
     }
 
     @Override
     public void declareBlockers(Player defender, Combat combat) {
         brains.declareBlockersFor(defender, combat);
+        DecisionDump.block(defender, combat); // magic-tools: essai Claude arbitre, sans effet sur le jeu
     }
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        return brains.chooseSpellAbilityToPlay();
+        final List<SpellAbility> chosen = brains.chooseSpellAbilityToPlay();
+        DecisionDump.spell(player, chosen); // magic-tools: essai Claude arbitre, sans effet sur le jeu
+        return chosen;
     }
 
     @Override
@@ -1664,9 +1707,22 @@ public class PlayerControllerAi extends PlayerController {
 
         Cost costSoFar = sa.getPayCosts().copy();
 
-        for (int i = 0; i < max; i++) {
+        // magic-tools: rule 164, energy cost parts are not merged by Cost.add, each one is checked alone against the
+        // energy pool: Replicate {E}{E}{E} (Reiterating Bolt) always looked payable and the loop ran to Integer.MAX_VALUE
+        // (game frozen). Count the energy of all the parts, and never go beyond 64 copies.
+        final int energy = player.getCounters(forge.game.card.CounterEnumType.ENERGY);
+        for (int i = 0; i < Math.min(max, 64); i++) {
             costSoFar.add(cost);
             SpellAbility fullCostSa = sa.copyWithDefinedCost(costSoFar);
+            int energyNeeded = 0;
+            for (CostPart part : costSoFar.getCostParts()) {
+                if (part instanceof CostPayEnergy) {
+                    energyNeeded += part.getAbilityAmount(fullCostSa);
+                }
+            }
+            if (energyNeeded > energy) {
+                break;
+            }
             if (ComputerUtilCost.canPayCost(fullCostSa, player, sa.isTrigger())) {
                 chosenAmount++;
             } else {

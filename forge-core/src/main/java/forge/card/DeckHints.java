@@ -90,6 +90,23 @@ public class DeckHints {
         }
         return false;
     }
+    /** magic-tools: rule 246, the names a hint of this type lists (DeckNeeds:Name$A|B gives A and B). */
+    public List<String> names(Type type) {
+        final List<String> out = new ArrayList<>();
+        if (filters != null) {
+            for (Pair<Type, String> filter : filters) {
+                if (filter.getLeft() == type) {
+                    for (String n : filter.getRight().split("\\|")) {
+                        if (!n.trim().isEmpty()) {
+                            out.add(n.trim());
+                        }
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     public boolean is(Type type, String hints[]) {
         if (filters == null) {
             return false;

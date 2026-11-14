@@ -139,6 +139,58 @@ public class ComputerUtilCost {
      *            the source
      * @return true, if successful
      */
+    /**
+     * magic-tools: rule 130, the spell's damage (DamageAll hitting players, DealDamage aimed at an opponent) is enough
+     * to kill an opponent, and the AI survives what the spell does to it.
+     */
+    public static boolean spellKillsOpponent(final Player ai, final SpellAbility sa) {
+        if (sa == null) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        for (SpellAbility sub = sa.getRootAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getApi() != forge.game.ability.ApiType.DamageAll && sub.getApi() != forge.game.ability.ApiType.DealDamage) {
+                continue;
+            }
+            final String numDmg = sub.getParam("NumDmg");
+            if (numDmg == null) {
+                continue;
+            }
+            final int dmg = AbilityUtils.calculateAmount(host, numDmg, sub);
+            if (dmg <= 0) {
+                continue;
+            }
+            final java.util.List<Player> hit = new java.util.ArrayList<>();
+            if (sub.getApi() == forge.game.ability.ApiType.DamageAll) {
+                final String validP = sub.getParamOrDefault("ValidPlayers", "");
+                if (validP.isEmpty()) {
+                    continue;
+                }
+                if (validP.equals("Player") && ai.getLife() <= ComputerUtilCombat.predictDamageTo(ai, dmg, host, false)) {
+                    return false;
+                }
+                for (Player opp : ai.getOpponents()) {
+                    if (validP.equals("Player") || validP.contains("Opponent")) {
+                        hit.add(opp);
+                    }
+                }
+            } else if (sub.usesTargeting()) {
+                for (Player p : sub.getTargets().getTargetPlayers()) {
+                    if (p.isOpponentOf(ai)) {
+                        hit.add(p);
+                    }
+                }
+            }
+            for (Player opp : hit) {
+                if (opp.canLoseLife() && !opp.cantLoseForZeroOrLessLife()
+                        && opp.getLife() <= ComputerUtilCombat.predictDamageTo(opp, dmg, host, false)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     public static boolean checkDiscardCost(final Player ai, final Cost cost, final Card source, SpellAbility sa) {
         if (cost == null) {
             return true;
@@ -172,8 +224,14 @@ public class ComputerUtilCost {
                     }
                     num = AbilityUtils.calculateAmount(source, disc.getAmount(), sa);
                 }
+                // magic-tools: rule 130, a spell that kills the opponent on resolution pays its discard with any card
+                // (tournament v19, Profanation: Sickening Dreams kept with the opponent at 2 life, X = 2 and one fatty)
+                final boolean lethal = num > 0 && spellKillsOpponent(ai, sa);
                 for (int i = 0; i < num; i++) {
                     Card pref = ComputerUtil.getCardPreference(ai, source, "DiscardCost", typeList);
+                    if (pref == null && lethal && !typeList.isEmpty()) {
+                        pref = ComputerUtilCard.getWorstAI(typeList);
+                    }
                     if (pref == null) {
                         return false;
                     }
@@ -323,7 +381,7 @@ public class ComputerUtilCost {
 
                 int count = 0;
                 while (count < amount) {
-                    Card prefCard = ComputerUtil.getCardPreference(ai, source, "SacCost", typeList);
+                    Card prefCard = ComputerUtil.getCardPreference(ai, source, "SacCost", typeList, sourceAbility);
                     if (prefCard == null) {
                         return false;
                     }
@@ -699,6 +757,12 @@ public class ComputerUtilCost {
 
         val = ObjectUtils.min(val, abCost.getMaxForNonManaX(root, ai, effect));
 
+        // magic-tools: rule 193, X paid in life (Fire Covenant) never spends the last 4 life, same floor as checkLifeCost
+        final forge.game.cost.CostPayLife lifeX = abCost.getCostPartByType(forge.game.cost.CostPayLife.class);
+        if (val != null && !effect && lifeX != null && "X".equals(lifeX.getAmount()) && !ai.cantLoseForZeroOrLessLife()) {
+            val = Math.min(val, Math.max(0, ai.getLife() - 4));
+        }
+
         if (val != null && val > 0) {
             // filter cost parts for preferences, don't choose X > than possible preferences
             for (final CostPart part : abCost.getCostParts()) {
@@ -714,7 +778,7 @@ public class ComputerUtilCost {
 
                     int count = 0;
                     while (count < val) {
-                        Card prefCard = ComputerUtil.getCardPreference(ai, source, "SacCost", typeList);
+                        Card prefCard = ComputerUtil.getCardPreference(ai, source, "SacCost", typeList, sa);
                         if (prefCard == null) {
                             break;
                         }

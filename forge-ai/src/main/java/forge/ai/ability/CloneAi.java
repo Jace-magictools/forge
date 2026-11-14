@@ -4,6 +4,8 @@ import forge.ai.AiAbilityDecision;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilCard;
 import forge.ai.SpellAbilityAi;
+import forge.ai.MassCloneAi;
+import forge.ai.StageCopyAi;
 import forge.game.Game;
 import forge.game.ability.AbilityUtils;
 import forge.game.card.*;
@@ -32,6 +34,18 @@ public class CloneAi extends SpellAbilityAi {
         // "Can I use this to block something?"
 
         PhaseHandler phase = game.getPhaseHandler();
+
+        // magic-tools: Thespian's Stage copies a Locus (StageCopyAi)
+        if (StageCopyAi.applies(sa)) {
+            return StageCopyAi.setTarget(ai, sa) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
+        // magic-tools: rule 127, mass clone of our own permanents (Mirrorform)
+        if (MassCloneAi.applies(sa)) {
+            return MassCloneAi.setTarget(ai, sa) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
 
         if (sa.usesTargeting()) {
             sa.resetTargets();
@@ -94,7 +108,9 @@ public class CloneAi extends SpellAbilityAi {
                 return new AiAbilityDecision(0, AiPlayDecision.StopRunawayActivations);
             }
             if (sa.hasParam("Choices")) {
-                CardCollectionView choices = CardLists.getValidCards(host.getGame().getCardsIn(ZoneType.Battlefield),
+                // magic-tools: rule 119, the choices are looked for in ChoiceZone like CloneEffect does (graveyard for Ezri Dax)
+                ZoneType choiceZone = sa.hasParam("ChoiceZone") ? ZoneType.smartValueOf(sa.getParam("ChoiceZone")) : ZoneType.Battlefield;
+                CardCollectionView choices = CardLists.getValidCards(host.getGame().getCardsIn(choiceZone),
                         sa.getParam("Choices"), host.getController(), host, sa);
 
                 chance = !choices.isEmpty();
@@ -239,6 +255,12 @@ public class CloneAi extends SpellAbilityAi {
      * @see forge.ai.SpellAbilityAi#checkPhaseRestrictions(forge.game.player.Player, forge.game.spellability.SpellAbility, forge.game.phase.PhaseHandler)
      */
     protected boolean checkPhaseRestrictions(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
+        if (StageCopyAi.applies(sa)) {
+            return StageCopyAi.phaseOk(ai, ph);
+        }
+        if (MassCloneAi.applies(sa)) {
+            return MassCloneAi.phaseOk(ai, ph);
+        }
         // don't use instant speed clone abilities outside computers
         // Combat_Begin step
         if (!ph.is(PhaseType.COMBAT_BEGIN)

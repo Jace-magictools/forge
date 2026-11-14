@@ -4,6 +4,7 @@ import forge.ai.AiAbilityDecision;
 import forge.ai.AiPlayDecision;
 import forge.ai.ComputerUtilCard;
 import forge.ai.ComputerUtilCost;
+import forge.ai.EdictTradeAi;
 import forge.ai.SpellAbilityAi;
 import forge.game.Game;
 import forge.game.ability.AbilityUtils;
@@ -131,11 +132,21 @@ public class SacrificeAi extends SpellAbilityAi {
 
             List<Card> humanList = CardLists.getValidCards(ai.getStrongestOpponent().getCardsIn(ZoneType.Battlefield), valid, sa.getActivatingPlayer(), source, sa);
 
+            // magic-tools: each player sacrifices its worst creatures; cast if the opponent loses clearly more
+            if (defined.equals("Player") && valid.equals("Creature") && !sa.isTrigger() && !mandatory) {
+                List<Card> aiList = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield), valid, sa.getActivatingPlayer(), source, sa);
+                return EdictTradeAi.worthCasting(aiList, humanList, amount) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+
             // Since all of the cards have AI:RemoveDeck:All, I enabled 1 for 1
             // (or X for X) trades for special decks
             return humanList.size() >= amount ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         } else if (defined.equals("You")) {
             List<Card> computerList = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield), valid, sa.getActivatingPlayer(), source, sa);
+            // magic-tools: rule 224, one creature for several from the graveyard (Victimize)
+            if (sacrificeReturnsMore(ai, sa, computerList)) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
             for (Card c : computerList) {
                 if ("Lethal".equals(aiLogic)) {
                     boolean isLethal = false;
@@ -164,6 +175,36 @@ public class SacrificeAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+    }
+
+    /**
+     * magic-tools: rule 224. "Sacrifice a creature, then return targets from your graveyard to the battlefield":
+     * worth it when what comes back beats the creature that goes. After combat, so the creature still attacks.
+     */
+    private static boolean sacrificeReturnsMore(final Player ai, final SpellAbility sa, final List<Card> mine) {
+        final SpellAbility sub = sa.getSubAbility();
+        if (mine.isEmpty() || sub == null || sub.getApi() != forge.game.ability.ApiType.ChangeZone || !sub.usesTargeting()
+                || !"Graveyard".equals(sub.getParam("Origin")) || !"Battlefield".equals(sub.getParam("Destination"))
+                || !ai.getGame().getPhaseHandler().is(forge.game.phase.PhaseType.MAIN2, ai)) {
+            return false;
+        }
+        final CardCollection back = CardLists.getValidCards(ai.getCardsIn(ZoneType.Graveyard), sub.getTargetRestrictions().getValidTgts(),
+                ai, sa.getHostCard(), sub);
+        final int min = sub.getMinTargets();
+        final int max = sub.getMaxTargets();
+        if (back.isEmpty() || back.size() < min) {
+            return false;
+        }
+        ComputerUtilCard.sortByEvaluateCreature(back);
+        int value = 0;
+        for (int i = 0; i < Math.min(max, back.size()); i++) {
+            value += back.get(i).isCreature() ? ComputerUtilCard.evaluateCreature(back.get(i)) : 0;
+        }
+        int worst = Integer.MAX_VALUE;
+        for (Card c : mine) {
+            worst = Math.min(worst, c.isCreature() ? ComputerUtilCard.evaluateCreature(c) : 0);
+        }
+        return value > worst;
     }
 
     @Override
@@ -218,6 +259,10 @@ public class SacrificeAi extends SpellAbilityAi {
             }
         }
 
+        // magic-tools: rule 114, echo of a permanent with death value
+        if (sa.hasParam("Echo") && !forge.ai.EchoPayAi.shouldPay(payer, sa, cost)) {
+            return false;
+        }
         return super.willPayUnlessCost(payer, sa, cost, alreadyPaid, payers);
     }
 }

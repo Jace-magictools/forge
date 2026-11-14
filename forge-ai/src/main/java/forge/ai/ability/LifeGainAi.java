@@ -142,8 +142,15 @@ public class LifeGainAi extends SpellAbilityAi {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
 
+        // magic-tools: rule 239. "Gain life equal to the sacrificed card's toughness" reads 0 until the cost is paid; a spell
+        // that does something else too (Severed Strands, Reckoner's Bargain) is not judged on that 0. The cost is still
+        // gated by willPayCosts (fodder only).
+        final boolean sacrificedAmount = sa.isSpell() && sa.getSubAbility() != null
+                && sa.getPayCosts() != null && sa.getPayCosts().hasSpecificCostType(CostSacrifice.class)
+                && sa.getSVar(amountStr).startsWith("Sacrificed$");
+
         // don't use it if no life to gain
-        if (!activateForCost && (lifeAmount <= 0 || !ai.canGainLife())) {
+        if (!activateForCost && !sacrificedAmount && (lifeAmount <= 0 || !ai.canGainLife())) {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 

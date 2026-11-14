@@ -96,6 +96,11 @@ public class TapAi extends TapAiBase {
                     final CostPayLife lifeCost = (CostPayLife) part;
                     Integer amount = lifeCost.convertAmount();
                     if (payer.getLife() > (amount + 1) && payer.canPayLife(amount, true, sa)) {
+                        // magic-tools: rule 205, mana creatures and colored symbols count too
+                        if (payer.getLife() > 4 && forge.ai.TapLandColorAi.shockUnlocks(payer, source,
+                                new CardCollection(), CardLists.filter(payer.getCardsIn(ZoneType.Hand), CardPredicates.NON_LANDS))) {
+                            return true;
+                        }
                         final int landsize = payer.getLandsInPlay().size() + 1;
                         // Check if the AI has enough lands to play the card
                         final CardCollection playable = CardLists.filter(
@@ -109,7 +114,7 @@ public class TapAi extends TapAiBase {
                         for (Card c : playable) {
                             // Check if the AI can pay for the card with the mana it has and intends to play it
                             if (c.getManaCost().canBePaidWithAvailable(availableColors)
-                                    && ComputerUtil.hasReasonToPlayCardThisTurn(payer, c)) {
+                                    && ShockLandAi.hasReasonToPlayCardThisTurn(payer, c)) {
                                 return true;
                             }
                         }

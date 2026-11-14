@@ -105,10 +105,19 @@ public class TokenAi extends SpellAbilityAi {
         }
 
         boolean haste = actualToken.hasKeyword(Keyword.HASTE);
+        // magic-tools: rule 293, haste granted by the spell itself (Song of Totentanz, Rally at the Hornburg,
+        // Heroic Reinforcements: a PumpAll / Pump sub-ability that gives haste to the new tokens) counts as haste
+        if (!haste && NewAi.on(ai, 293) && grantsHaste293(sa)) {
+            haste = true;
+        }
         boolean oneShot = sa.getSubAbility() != null
                 && sa.getSubAbility().getApi() == ApiType.DelayedTrigger;
         boolean isCreature = actualToken.isCreature();
 
+        // magic-tools: rule 140, mana floating from a loop shortcut empties with the phase: make the tokens now
+        if (forge.ai.UntapLoopAi.floatingPaysFor(ai, sa)) {
+            return true;
+        }
         // Don't generate tokens without haste before main 2 if possible
         if (ph.getPhase().isBefore(PhaseType.MAIN2) && ph.isPlayerTurn(ai) && !haste && !sa.hasParam("ActivationPhases")
                 && !ComputerUtil.castSpellInMain1(ai, sa)) {
@@ -121,6 +130,10 @@ public class TokenAi extends SpellAbilityAi {
             if (!buff && !pwMinus) {
                 return false;
             }
+        }
+        // magic-tools: rule 24, tokens gone before our combat only block on the opponent's turn (ShortLivedTokenAi)
+        if (ShortLivedTokenAi.wastedNow(ai, sa, ph)) {
+            return false;
         }
         if ((ph.isPlayerTurn(ai) || ph.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS))
                 && !sa.hasParam("ActivationPhases") && !sa.hasParam("PlayerTurn") && !isSorcerySpeed(sa, ai)
@@ -204,6 +217,14 @@ public class TokenAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.DoesntImpactCombat);
         }
 
+        // magic-tools: rule 140, floating mana from a loop shortcut is spent, no dice roll
+        if (forge.ai.UntapLoopAi.floatingPaysFor(ai, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 108, a token sorcery from the hand does not roll the dice meant for abilities
+        if (StormRitualAi.noChanceRoll(ai, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         if (MyRandom.getRandom().nextFloat() <= chance) {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
@@ -504,5 +525,24 @@ public class TokenAi extends SpellAbilityAi {
             }
         }
         return super.willPayUnlessCost(payer, sa, cost, alreadyPaid, payers);
+    }
+
+    /** magic-tools rule 293: a sub-ability of the token spell gives haste to the created tokens (or to all our creatures). */
+    public static boolean grantsHaste293(final SpellAbility sa) {
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getApi() != ApiType.Pump && sub.getApi() != ApiType.PumpAll) {
+                continue;
+            }
+            final String kw = sub.getParam("KW");
+            if (kw == null || !kw.contains("Haste")) {
+                continue;
+            }
+            final String who = sub.getApi() == ApiType.PumpAll ? sub.getParamOrDefault("ValidCards", "")
+                    : sub.getParamOrDefault("Defined", "");
+            if (who.contains("Created") || who.contains("Remembered") || who.contains("YouCtrl")) {
+                return true;
+            }
+        }
+        return false;
     }
 }

@@ -44,10 +44,28 @@ public class BalanceAi extends SpellAbilityAi {
 
         final CardCollectionView humHand = opp.getCardsIn(ZoneType.Hand);
         final CardCollectionView compHand = aiPlayer.getCardsIn(ZoneType.Hand);
-        diff += 0.5 * (humHand.size() - compHand.size());
+        // magic-tools: rule 232, tournament v24, Dovin at 1 life, no creature against five, held Balance from turn 5 until
+        // dead on turn 16: the hand it would discard does not matter when the board kills next turn
+        if (diff > 2 && "BalanceCreaturesAndLands".equals(logic) && boardIsLethal(aiPlayer, opp)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 232, the spell itself leaves the hand, and a clear gain is taken at once rather than drawn each turn
+        diff += 0.5 * (humHand.size() - (compHand.size() - (compHand.contains(sa.getHostCard()) ? 1 : 0)));
+        if (diff >= 5 && "BalanceCreaturesAndLands".equals(logic)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
 
         // Larger differential == more chance to actually cast this spell
         boolean willPlay = diff > 2 && MyRandom.getRandom().nextInt(100) < diff*10;
         return new AiAbilityDecision(willPlay ? 100 : 0, willPlay ? forge.ai.AiPlayDecision.WillPlay : AiPlayDecision.StopRunawayActivations);
+    }
+
+    // magic-tools: rule 232, the opponent's creatures, unblocked, take everything we have left
+    private static boolean boardIsLethal(final Player ai, final Player opp) {
+        int power = 0;
+        for (final forge.game.card.Card c : CardLists.filter(opp.getCardsIn(ZoneType.Battlefield), CardPredicates.CREATURES)) {
+            power += Math.max(0, c.getNetCombatDamage());
+        }
+        return power >= ai.getLife();
     }
 }

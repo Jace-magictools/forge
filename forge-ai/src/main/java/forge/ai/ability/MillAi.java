@@ -5,9 +5,13 @@ import com.google.common.collect.Maps;
 import forge.ai.*;
 import forge.game.ability.AbilityUtils;
 import forge.game.card.Card;
+import forge.game.card.CardCollection;
 import forge.game.card.CardCollectionView;
 import forge.game.card.CardLists;
 import forge.game.card.CardPredicates;
+import forge.game.cost.Cost;
+import forge.game.cost.CostPart;
+import forge.game.cost.CostSacrifice;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -49,6 +53,11 @@ public class MillAi extends SpellAbilityAi {
             // creatures with a tap cost to mill (e.g. Doorkeeper) should be activated at the opponent's end step
             // because they are also potentially useful for combat
             return ph.is(PhaseType.END_OF_TURN) && ph.getNextTurn().equals(ai);
+        }
+        // magic-tools rule 81: an outlet that sacrifices a creature also works once the opponent's blockers are declared
+        if (sa.getPayCosts() != null && sa.getPayCosts().hasSpecificCostType(CostSacrifice.class)
+                && BlockerFodderAi.blockersDeclaredOnOpponentTurn(ai)) {
+            return true;
         }
         return !ph.getPhase().isBefore(PhaseType.MAIN2) || sa.hasParam("ActivationPhases")
                 || ComputerUtil.castSpellInMain1(ai, sa);
@@ -99,7 +108,11 @@ public class MillAi extends SpellAbilityAi {
                 }
 
                 int numCards;
-                if (sa.hasParam("NumCards")) {
+                final Integer sacPower = predictSacrificedPower(ai, sa);
+                if (sacPower != null) {
+                    // e.g. Altar of Dementia: the amount is only known once the cost is paid
+                    numCards = sacPower;
+                } else if (sa.hasParam("NumCards")) {
                     // need to set as target for some calculate
                     sa.getTargets().add(o);
                     numCards = AbilityUtils.calculateAmount(sa.getHostCard(), sa.getParam("NumCards"), sa);
@@ -124,7 +137,8 @@ public class MillAi extends SpellAbilityAi {
                 }
 
                 final CardCollectionView pLibrary = o.getCardsIn(ZoneType.Library);
-                if (pLibrary.isEmpty()) {
+                // magic-tools: what our mill abilities on the stack will already take does not count
+                if (pLibrary.size() <= PersistLoopAi.pendingMill(ai, o)) {
                     continue;
                 }
 
@@ -154,6 +168,28 @@ public class MillAi extends SpellAbilityAi {
             sa.getTargets().add(max.getKey());
         }
         return true;
+    }
+
+    /**
+     * For mill abilities whose amount depends on the creature sacrificed as a cost
+     * ("Sacrificed$CardPower", e.g. Altar of Dementia), predict the power of the creature
+     * the AI would sacrifice. Returns null if the ability is not of that kind.
+     */
+    private static Integer predictSacrificedPower(final Player ai, final SpellAbility sa) {
+        if (!"X".equals(sa.getParam("NumCards")) || !"Sacrificed$CardPower".equals(sa.getSVar("X"))) {
+            return null;
+        }
+        final Cost cost = sa.getPayCosts();
+        if (cost == null) {
+            return null;
+        }
+        for (final CostPart part : cost.getCostParts()) {
+            if (part instanceof CostSacrifice sac && !sac.payCostFromSource()) {
+                final CardCollection choice = ComputerUtil.chooseSacrificeType(ai, sac.getType(), sa, null, false, 1, null);
+                return choice == null || choice.isEmpty() ? 0 : Math.max(0, choice.getFirst().getNetPower());
+            }
+        }
+        return null;
     }
 
     @Override

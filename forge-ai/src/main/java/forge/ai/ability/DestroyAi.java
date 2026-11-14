@@ -153,6 +153,8 @@ public class DestroyAi extends SpellAbilityAi {
             list = ComputerUtil.filterAITgts(sa, ai, list, true);
 
             list = CardLists.getNotKeyword(list, Keyword.INDESTRUCTIBLE);
+            // magic-tools: rule 194, a removal spell does not go on Chromatic Star or a Treasure
+            list = MinorPermanentAi.withoutMinor(sa, list);
             if (CardLists.getNotType(list, "Creature").isEmpty()) {
                 list = ComputerUtilCard.prioritizeCreaturesWorthRemovingNow(ai, list, false);
             }
@@ -193,6 +195,14 @@ public class DestroyAi extends SpellAbilityAi {
             // Try to avoid targeting creatures that are dead on board
             list = ComputerUtil.filterCreaturesThatWillDieThisTurn(ai, list);
             if (list.isEmpty()) {
+                // magic-tools: rule 131, a destroy that rewards destroying our own permanent ("if you controlled that
+                // artifact, create three Goblins": Gleeful Demolition) takes our least useful one when the opponents
+                // offer nothing (tournament v19, Artob: 103 times in hand, 27 cast)
+                Card fodder = rewardsOwnTarget(sa) && maxTargets == 1 ? chooseOwnFodder(ai, sa) : null;
+                if (fodder != null) {
+                    sa.getTargets().add(fodder);
+                    return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+                }
                 return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
             }
 
@@ -214,6 +224,7 @@ public class DestroyAi extends SpellAbilityAi {
                 }
 
                 Card choice;
+                Card landFirst = null;
                 // If the targets are only of one type, take the best
                 if (CardLists.getNotType(list, "Creature").isEmpty()) {
                     choice = ComputerUtilCard.getBestRemovalTargetAI(ai, list);
@@ -228,18 +239,32 @@ public class DestroyAi extends SpellAbilityAi {
 
                     if (shouldApplyLandRemovalLogic(sa, logic)) {
                         // Strip Mine, Wasteland, Dust Bowl, and similar lands.
-                        if (!doLandForLandRemovalLogic(sa, ai, choice, logic)) {
+                        // magic-tools: rule 23, a land destruction deck trades lands on purpose
+                        if (!(ComputerUtilCost.isSacrificeSelfCost(sa.getPayCosts())
+                                && LandTradeAi.stripInLandDestructionDeck(ai, choice))
+                                && !doLandForLandRemovalLogic(sa, ai, choice, logic)) {
                             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                         }
                     }
                 } else {
+                    // magic-tools: rule 43, mixed targets (Befoul): an opponent land first, in our main 2
+                    landFirst = SorceryRemovalAi.landFirst(ai, sa, list);
+                    if (landFirst != null && !LandTradeAi.castNow(sa, landFirst, ai)) {
+                        sa.resetTargets();
+                        return new AiAbilityDecision(0, AiPlayDecision.AnotherTime);
+                    }
                     // TODO look for "exiled until leaves" of own stuff
-                    choice = ComputerUtilCard.getBestRemovalTargetAI(ai, list);
+                    choice = landFirst != null ? landFirst : ComputerUtilCard.getBestRemovalTargetAI(ai, list);
                 }
                 //option to hold removal instead only applies for single targeted removal
-                if (!sa.isTrigger() && sa.getMaxTargets() == 1) {
+                if (landFirst == null && !sa.isTrigger() && sa.getMaxTargets() == 1) {
                     if (choice == null || !ComputerUtilCard.useRemovalNow(sa, choice, 0, ZoneType.Graveyard)) {
-                        return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+                        // magic-tools: rule 39, mixed targets (Befoul): the land when the creature is held
+                        final Card land = SorceryRemovalAi.landInstead(ai, sa, list, choice);
+                        if (land == null) {
+                            return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+                        }
+                        choice = land;
                     }
                 }
 
@@ -295,6 +320,47 @@ public class DestroyAi extends SpellAbilityAi {
             }
         }
         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+    }
+
+    /** magic-tools: rule 131, a sub-ability that only happens if we controlled the destroyed card (RememberedLKI + YouCtrl). */
+    static boolean rewardsOwnTarget(final SpellAbility sa) {
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if ("RememberedLKI".equals(sub.getParam("ConditionDefined"))
+                    && sub.getParamOrDefault("ConditionPresent", "").contains("YouCtrl")
+                    && !sub.hasParam("ConditionCompare")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * magic-tools: rule 131, our least useful targetable permanent: a token, a card that asks to be sacrificed (SacMe),
+     * a card that gives something when it goes to the graveyard (Ichor Wellspring, Perilous Myr), or a free creature
+     * (Memnite). Never a creature with power 3 or more, never the source.
+     */
+    static Card chooseOwnFodder(final Player ai, final SpellAbility sa) {
+        final Card source = sa.getHostCard();
+        CardCollection own = CardLists.getTargetableCards(ai.getCardsIn(ZoneType.Battlefield), sa);
+        own = CardLists.filter(own, c -> c != source && !c.isLand() && !c.hasKeyword(Keyword.INDESTRUCTIBLE)
+                && !(c.isCreature() && c.getNetPower() >= 3)
+                && (c.isToken() || c.hasSVar("SacMe") || c.getCMC() == 0 || hasDiesTrigger(c)));
+        if (own.isEmpty()) {
+            return null;
+        }
+        CardCollection withTrigger = CardLists.filter(own, DestroyAi::hasDiesTrigger);
+        return ComputerUtilCard.getWorstAI(withTrigger.isEmpty() ? own : withTrigger);
+    }
+
+    private static boolean hasDiesTrigger(final Card c) {
+        for (forge.game.trigger.Trigger t : c.getTriggers()) {
+            if (t.getMode() == forge.game.trigger.TriggerType.ChangesZone
+                    && "Battlefield".equals(t.getParam("Origin")) && "Graveyard".equals(t.getParam("Destination"))
+                    && "Card.Self".equals(t.getParam("ValidCard"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean shouldApplyLandRemovalLogic(SpellAbility sa, String logic) {
@@ -390,8 +456,9 @@ public class DestroyAi extends SpellAbilityAi {
                 if (list.isEmpty()) {
                     break;
                 } else {
-                    Card c;
-                    if (CardLists.getNotType(list, "Creature").isEmpty()) {
+                    // magic-tools: a forced destroy (Culling Scales) takes an indestructible permanent first
+                    Card c = CullingScalesAi.harmlessTarget(list);
+                    if (c == null && CardLists.getNotType(list, "Creature").isEmpty()) {
                         if (!sa.getUniqueTargets().isEmpty() && sa.getParent().getApi() == ApiType.Destroy
                                 && sa.getUniqueTargets().get(0) instanceof Card) {
                             // basic ai for Diaochan
@@ -399,7 +466,7 @@ public class DestroyAi extends SpellAbilityAi {
                         } else {
                             c = ComputerUtilCard.getWorstCreatureAI(list);
                         }
-                    } else {
+                    } else if (c == null) {
                         c = ComputerUtilCard.getCheapestPermanentAI(list, sa, false);
                     }
                     if (sa.canTarget(c)) {

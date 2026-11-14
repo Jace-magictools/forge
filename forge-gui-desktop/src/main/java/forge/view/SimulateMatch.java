@@ -112,6 +112,39 @@ public class SimulateMatch {
             return;
         }
 
+        if (params.containsKey("c")) {
+            rules.setSimTimeout(Integer.parseInt(params.get("c").get(0)));
+        }
+
+        // Liste de paires (une par ligne, « A.dck B.dck ») : un seul lancement de Forge pour beaucoup de matchs,
+        // sans recharger les cartes à chaque paire (tournoi de tous les decks du site, réparti sur plusieurs jobs).
+        if (params.containsKey("P")) {
+            List<String> lines;
+            try {
+                lines = java.nio.file.Files.readAllLines(new File(params.get("P").get(0)).toPath());
+            } catch (java.io.IOException e) {
+                System.out.println("Pair file not found - " + params.get("P").get(0));
+                return;
+            }
+            for (String line : lines) {
+                String[] pair = line.trim().split("\\s+");
+                if (pair.length != 2) {
+                    continue;
+                }
+                params.put("d", Arrays.asList(pair));
+                System.out.println("Pair: " + pair[0] + " " + pair[1]);
+                simulateDecks(params, type, deckDir, rules, nGames, matchSize, outputGamelog, seed);
+            }
+            System.out.flush();
+            return;
+        }
+
+        simulateDecks(params, type, deckDir, rules, nGames, matchSize, outputGamelog, seed);
+        System.out.flush();
+    }
+
+    private static void simulateDecks(Map<String, List<String>> params, GameType type, String deckDir, GameRules rules,
+            int nGames, int matchSize, boolean outputGamelog, Long seed) {
         List<RegisteredPlayer> pp = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
 
@@ -161,10 +194,6 @@ public class SimulateMatch {
             }
         }
 
-        if (params.containsKey("c")) {
-            rules.setSimTimeout(Integer.parseInt(params.get("c").get(0)));
-        }
-
         sb.append(" - ").append(Lang.nounWithNumeral(nGames, "game")).append(" of ").append(type);
         if (seed != null) {
             sb.append(" seed ").append(seed);
@@ -183,11 +212,14 @@ public class SimulateMatch {
             }
         } else {
             for (int iGame = 0; iGame < nGames; iGame++) {
+                // magic-tools (31/10): -R reseeds each game from (seed, decks, game number), so a game no longer
+                // depends on the games played before it in the same Java (paired comparison of two engines)
+                if (seed != null && params.containsKey("R")) {
+                    MyRandom.setRandom(new Random(seed * 1000003L + 31L * String.join(" ", params.get("d")).hashCode() + iGame));
+                }
                 simulateSingleMatch(mc, iGame, outputGamelog);
             }
         }
-
-        System.out.flush();
     }
 
     private static void argumentHelp() {
@@ -204,6 +236,7 @@ public class SimulateMatch {
         System.out.println("\tS - RNG seed for simulation");
         System.out.println("\tA - AI profile per player, in the same order as the decks (e.g. -a Default Experimental)");
         System.out.println("\tc - Clock flag. Set the maximum time in seconds before calling the match a draw, defaults to 120.");
+        System.out.println("\tP - file of deck pairs, one \"A.dck B.dck\" per line: N games for each pair in one run");
         System.out.println("\tq - Quiet flag. Output just the game result, not the entire game log.");
     }
 
@@ -213,6 +246,28 @@ public class SimulateMatch {
 
         final Game g1 = mc.createGame();
         g1.setNoGUIUser();
+        // magic-tools: the AI gives up its priority when one decision takes more than AI_TIMEOUT
+        // seconds of wall clock (5 by default); simulations run throttled behind the production
+        // server, so a busy machine made the AI pass (about 2 % of tournament games). -Dforge.aiTimeout=N
+        g1.AI_TIMEOUT = Integer.getInteger("forge.aiTimeout", 20);
+        // magic-tools : chasse aux bourdes, lignes « BOURDE|… » sur la sortie (-Dforge.bourdes=true) ;
+        // visionneur de parties, un JSON par partie dans le dossier donné (-Dforge.partie=dossier), bourdes comprises
+        forge.ai.PartieRecorder recorder = null;
+        if (System.getProperty("forge.partie") != null) {
+            StringBuilder nom = new StringBuilder();
+            for (forge.game.player.Player p : g1.getRegisteredPlayers()) {
+                nom.append(nom.length() > 0 ? "--" : "").append(p.getName().replaceAll("[^A-Za-z0-9_-]+", "_"));
+            }
+            nom.append("-g").append(iGame + 1).append('-').append(System.currentTimeMillis());
+            recorder = new forge.ai.PartieRecorder(g1, java.nio.file.Path.of(System.getProperty("forge.partie")), nom.toString());
+        }
+        if (Boolean.getBoolean("forge.bourdes") || recorder != null) {
+            // le guetteur avant l'enregistreur : ses bourdes de fin de partie arrivent avant l'écriture du fichier
+            g1.subscribeToEvents(new forge.ai.BourdeWatcher(g1).avec(recorder));
+        }
+        if (recorder != null) {
+            g1.subscribeToEvents(recorder);
+        }
         // will run match in the same thread
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {

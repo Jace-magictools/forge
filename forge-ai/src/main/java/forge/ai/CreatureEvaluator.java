@@ -293,9 +293,14 @@ public class CreatureEvaluator implements Function<Card, Integer> {
             }
         }
 
+        // magic-tools rule 256: lords / anchors are worth what they give to our other creatures
+        value += addValue(StaticLord256.value(c), "static-lord");
+
         // card-specific evaluation modifier
-        if (c.hasSVar("AIEvaluationModifier")) {
-            value += AbilityUtils.calculateAmount(c, c.getSVar("AIEvaluationModifier"), null);
+        // magic-tools: not without a controller (copy evaluated before it has one: NPE in xCount, tournament v20, HYDRA)
+        if (c.hasSVar("AIEvaluationModifier") && c.getController() != null && c.getFirstSpellAbility() != null) {
+            // magic-tools: give the count a context (its controller), otherwise "Count$InYourHand" & co have no player
+            value += AbilityUtils.calculateAmount(c, c.getSVar("AIEvaluationModifier"), c.getFirstSpellAbility());
         }
 
         return value;

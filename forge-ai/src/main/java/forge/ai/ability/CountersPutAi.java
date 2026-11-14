@@ -124,6 +124,12 @@ public class CountersPutAi extends CountersAi {
 
     @Override
     protected AiAbilityDecision checkApiLogic(Player ai, final SpellAbility sa) {
+        // magic-tools: Atog / Arcbound Ravager eat a nontoken artifact only for lethal (ArtifactSacAi)
+        final Boolean artifactSac = ArtifactSacAi.decide(ai, sa);
+        if (artifactSac != null) {
+            return artifactSac ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         // AI needs to be expanded, since this function can be pretty complex
         // based on what the expected targets could be
         final Cost abCost = sa.getPayCosts();
@@ -222,6 +228,11 @@ public class CountersPutAi extends CountersAi {
         } else if ("AristocratCounters".equals(logic)) {
             return SpecialAiLogic.doAristocratWithCountersLogic(ai, sa);
         } else if ("PayEnergy".equals(logic)) {
+            // magic-tools: rule 181, energy that pays a sweep (Wrath of the Skies)
+            final SpellAbility sweep = ThresholdSweepAi.energySweepIn(sa);
+            if (sweep != null) {
+                return ThresholdSweepAi.decideEnergySweep(ai, sa, sweep);
+            }
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         } else if ("PayEnergyConservatively".equals(logic)) {
             boolean onlyInCombat = AiProfileUtil.getBoolProperty(ai, AiProps.CONSERVATIVE_ENERGY_PAYMENT_ONLY_IN_COMBAT);
@@ -444,7 +455,7 @@ public class CountersPutAi extends CountersAi {
             sa.resetTargets();
 
             CardCollection list;
-            if (sa.isCurse()) {
+            if (HostileCountersAi.isCurse(sa)) {
                 list = ai.getOpponents().getCardsIn(ZoneType.Battlefield);
             } else {
                 list = ComputerUtil.getSafeTargets(ai, sa, ai.getCardsIn(ZoneType.Battlefield));
@@ -532,7 +543,7 @@ public class CountersPutAi extends CountersAi {
                     }
                 }
 
-                if (sa.isCurse()) {
+                if (HostileCountersAi.isCurse(sa)) {
                     choice = chooseCursedTarget(list, type, amount, ai);
                 } else if (type.equals("P1P1") && !isSorcerySpeed(sa, ai)) {
                     for (Card c : list) {
@@ -595,7 +606,7 @@ public class CountersPutAi extends CountersAi {
                     .filter(CardPredicates.canReceiveCounters(cType));
             // Don't activate Curse abilities on my cards and non-curse abilities
             // on my opponents
-            if (cards.isEmpty() || (cards.get(0).getController().isOpponentOf(ai) && !sa.isCurse())) {
+            if (cards.isEmpty() || (cards.get(0).getController().isOpponentOf(ai) && !HostileCountersAi.isCurse(sa))) {
                 return new AiAbilityDecision(0, AiPlayDecision.MissingNeededCards);
             }
 
@@ -678,7 +689,7 @@ public class CountersPutAi extends CountersAi {
 
         if (sa.usesTargeting()) {
             CardCollection list;
-            if (sa.isCurse()) {
+            if (HostileCountersAi.isCurse(sa)) {
                 list = ai.getOpponents().getCardsIn(ZoneType.Battlefield);
             } else {
                 list = new CardCollection(ai.getCardsIn(ZoneType.Battlefield));
@@ -702,7 +713,7 @@ public class CountersPutAi extends CountersAi {
                     break;
                 }
 
-                if (sa.isCurse()) {
+                if (HostileCountersAi.isCurse(sa)) {
                     choice = chooseCursedTarget(list, type, amount, ai);
                 } else {
                     CardCollection lands = CardLists.filter(list, CardPredicates.LANDS);
@@ -757,6 +768,18 @@ public class CountersPutAi extends CountersAi {
             // all types will be added
             types = sa.getParam("CounterTypes").split(",");
             type = types[0];
+        }
+
+        if ("ExistingCounter".equals(type) && sa.usesTargeting()) {
+            return existingCounterTrigger(ai, sa, mandatory);
+        }
+
+        // magic-tools: rule 149, the token-created refund puts the counter back on the loop's shooter (DamageTokenLoopAi)
+        final Card loopShooter = forge.ai.DamageTokenLoopAi.refundTarget(ai, sa);
+        if (loopShooter != null) {
+            sa.resetTargets();
+            sa.getTargets().add(loopShooter);
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
 
         if ("ChargeToBestCMC".equals(aiLogic)) {
@@ -815,7 +838,7 @@ public class CountersPutAi extends CountersAi {
             CardCollection targetables = CardLists.getTargetableCards(ai.getGame().getCardsIn(ZoneType.Battlefield), sa);
             CardCollection list = ComputerUtil.filterAITgts(sa, ai, targetables, true);
             if (list.isEmpty() || list.equals(targetables)) {
-                if (sa.isCurse()) {
+                if (HostileCountersAi.isCurse(sa)) {
                     list = CardLists.filterControlledBy(targetables, ai.getOpponents());
                 } else {
                     list = CardLists.filterControlledBy(targetables, ai);
@@ -853,14 +876,19 @@ public class CountersPutAi extends CountersAi {
                 Card choice;
 
                 // Choose targets here:
-                if (sa.isCurse()) {
+                if (HostileCountersAi.isCurse(sa)) {
                     if (preferred) {
                         choice = chooseCursedTarget(list, type, amount, ai);
                         if (choice == null && mandatory) {
                             choice = Aggregates.random(list);
                         }
                     } else if (type.equals("M1M1")) {
-                        choice = ComputerUtilCard.getWorstCreatureAI(list);
+                        // magic-tools (rule 32): on our own creatures, the worst one that survives the counters
+                        // (Exemplar of Strength on itself rather than killing a Llanowar Elves)
+                        final int m1 = amount;
+                        CardCollection survivors = CardLists.filter(list,
+                                c -> c.getController().equals(ai) && c.getNetToughness() > m1);
+                        choice = ComputerUtilCard.getWorstCreatureAI(survivors.isEmpty() ? list : survivors);
                     } else {
                         choice = Aggregates.random(list);
                     }
@@ -969,7 +997,7 @@ public class CountersPutAi extends CountersAi {
         final String amountStr = sa.getParamOrDefault("CounterNum", "1");
         final int amount = AbilityUtils.calculateAmount(sa.getHostCard(), amountStr, sa);
 
-        if (sa.isCurse()) {
+        if (HostileCountersAi.isCurse(sa)) {
             final CardCollection opponents = CardLists.filterControlledBy(options, ai.getOpponents());
 
             if (!opponents.isEmpty()) {
@@ -1030,6 +1058,14 @@ public class CountersPutAi extends CountersAi {
             filtered = notUseless;
         }
 
+        // magic-tools (rule 208): the persist creature that actually gets its persist back
+        if (types.contains(p1p1)) {
+            final Card reload = PersistLoopAi.reloadTarget(filtered);
+            if (reload != null) {
+                return reload;
+            }
+        }
+
         // some special logic to reload Persist/Undying
         for (CounterType type : types) {
             if (p1p1.equals(type)) {
@@ -1056,6 +1092,76 @@ public class CountersPutAi extends CountersAi {
         }
 
         return ComputerUtilCard.getBestAI(filtered);
+    }
+
+    /**
+     * Skyship Plunderer and other "for each kind of counter on target permanent or player" triggers:
+     * poison the opponent to death, kill a -1/-1 creature, grow our own +1/+1 counters, else (mandatory)
+     * a target without counters so the trigger does nothing harmful.
+     */
+    private AiAbilityDecision existingCounterTrigger(final Player ai, final SpellAbility sa, final boolean mandatory) {
+        sa.resetTargets();
+        final TargetRestrictions tgt = sa.getTargetRestrictions();
+        if (tgt.canTgtPlayer()) {
+            PlayerCollection poisoned = ai.getOpponents().filter(PlayerPredicates.isTargetableBy(sa))
+                    .filter(PlayerPredicates.hasCounter(CounterEnumType.POISON, 9));
+            if (!poisoned.isEmpty()) {
+                sa.getTargets().add(poisoned.getFirst());
+                return new AiAbilityDecision(1000, AiPlayDecision.WillPlay);
+            }
+        }
+        CardCollection targetables = CardLists.getTargetableCards(ai.getGame().getCardsIn(ZoneType.Battlefield), sa);
+        CardCollection oppM1 = CardLists.filter(CardLists.filterControlledBy(targetables, ai.getOpponents()),
+                c -> c.isCreature() && c.getCounters(CounterEnumType.M1M1) > 0 && !c.hasKeyword(Keyword.UNDYING)
+                        && c.getNetToughness() <= 1 && c.canReceiveCounters(CounterEnumType.M1M1));
+        Card choice = ComputerUtilCard.getBestCreatureAI(oppM1);
+        if (choice == null) {
+            CardCollection ours = CardLists.filter(CardLists.filterControlledBy(targetables, ai), c -> {
+                if (!c.hasCounters()) {
+                    return false;
+                }
+                boolean useful = false;
+                for (CounterType ct : c.getCounters().elementSet()) {
+                    if (ComputerUtil.isNegativeCounter(ct, c)) {
+                        return false;
+                    }
+                    useful |= !ComputerUtil.isUselessCounter(ct, c) && c.canReceiveCounters(ct);
+                }
+                return useful;
+            });
+            choice = ComputerUtilCard.getBestCreatureAI(ours);
+            if (choice == null && !ours.isEmpty()) {
+                choice = ours.getFirst();
+            }
+        }
+        if (choice != null) {
+            sa.getTargets().add(choice);
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        if (sa.canTarget(ai) && !ai.getCounters().isEmpty() && ai.getPoisonCounters() == 0) {
+            sa.getTargets().add(ai);
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        if (!mandatory) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+        for (Player opp : ai.getOpponents()) {
+            if (sa.canTarget(opp) && opp.getCounters().isEmpty()) {
+                sa.getTargets().add(opp);
+                return new AiAbilityDecision(50, AiPlayDecision.MandatoryPlay);
+            }
+        }
+        CardCollection blank = CardLists.filter(targetables, c -> !c.hasCounters());
+        if (!blank.isEmpty()) {
+            sa.getTargets().add(blank.getFirst());
+            return new AiAbilityDecision(50, AiPlayDecision.MandatoryPlay);
+        }
+        if (sa.canTarget(ai)) {
+            sa.getTargets().add(ai);
+        } else if (!targetables.isEmpty()) {
+            sa.getTargets().add(targetables.getFirst());
+        }
+        return new AiAbilityDecision(50, AiPlayDecision.MandatoryPlay);
     }
 
     /**

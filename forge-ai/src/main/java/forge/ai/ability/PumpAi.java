@@ -75,7 +75,9 @@ public class PumpAi extends PumpAiBase {
             return isSorcerySpeed(sa, ai) || (ph.getNextTurn().equals(ai) && !ph.getPhase().isBefore(PhaseType.END_OF_TURN));
         } else if (logic.equals("Aristocrat")) {
             final boolean isThreatened = ComputerUtil.predictThreatenedObjects(ai, null, true).contains(sa.getHostCard());
-            if (!ph.is(PhaseType.COMBAT_DECLARE_BLOCKERS) && !isThreatened) {
+            // magic-tools: or after combat, to eat a creature stolen until end of turn
+            if (!ph.is(PhaseType.COMBAT_DECLARE_BLOCKERS) && !isThreatened
+                    && !ThreatenSacAi.hasStolenFodder(ai, sa.getHostCard())) {
                 return false;
             }
         } else if (logic.equals("SwitchPT")) {
@@ -89,7 +91,27 @@ public class PumpAi extends PumpAiBase {
 
     @Override
     protected boolean checkPhaseRestrictions(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
+        // magic-tools: rule 28, an empty Pump that only carries an opponent target (TargetCarrierAi)
+        if (TargetCarrierAi.isCarrier(sa)) {
+            return TargetCarrierAi.goodTime(ai, sa, ph);
+        }
+        // magic-tools: rule 56, a pump that draws is cast for the card when the mana is free (CantripPumpAi)
+        if (CantripPumpAi.isCantripPump(sa) && CantripPumpAi.goodTime(ai, sa, ph)) {
+            return true;
+        }
         final Game game = ai.getGame();
+        // magic-tools: rule 187, a fight is removal, not a combat trick: after our combat (the creature that taps
+        // for it did not attack), or at the end of the opponent's turn
+        if (FightGrantAi.implicitFight(sa) && game.getStack().isEmpty()
+                && (ph.is(PhaseType.MAIN2, ai) || ph.is(PhaseType.END_OF_TURN) && ph.getPlayerTurn().isOpponentOf(ai))) {
+            return true;
+        }
+        // magic-tools: rule 292 (plateau, Ugin 2d95dbcc7; tester 11/11: Uruk-hai captain cast without the haste the
+        // Wargs could tap to give): a haste pump goes in main 1, before attacks, when a creature that just arrived would
+        // attack with it; a creature that taps for it only gives it if it would not attack itself and is worth less
+        if (NewAi.on(ai, 292) && hasteBeforeAttack292(ai, sa, ph)) {
+            return true;
+        }
         if (game.getStack().isEmpty()) {
             boolean isBeforeMyAttack = ph.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS) && ph.isPlayerTurn(ai);
             boolean isBeforeOppCombat = ph.getPhase().isBefore(PhaseType.COMBAT_BEGIN) && ph.getPlayerTurn().isOpponentOf(ai);
@@ -114,8 +136,74 @@ public class PumpAi extends PumpAiBase {
         return true;
     }
 
+    /** magic-tools rule 292: is it main 1 and would a summoning-sick creature attack if this pump gave it haste? */
+    public static boolean hasteBeforeAttack292(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
+        final Game game = ai.getGame();
+        if (!game.getStack().isEmpty() || !ph.is(PhaseType.MAIN1, ai) || !sa.usesTargeting()
+                || sa.getParam("KW") == null || !sa.getParam("KW").contains("Haste") || sa.isCurse()) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        final boolean tapsHost = host != null && host.isCreature() && host.isInPlay()
+                && sa.getPayCosts() != null && sa.getPayCosts().hasTapCost();
+        if (tapsHost) {
+            if (host.isTapped() || host.hasSickness()) {
+                return false;
+            }
+            final forge.game.combat.Combat c0 = new forge.game.combat.Combat(ai);
+            new AiAttackController(ai).declareAttackers(c0);
+            if (c0.isAttacking(host)) {
+                return false; // the source attacks: keep it for combat
+            }
+        }
+        for (final Card t : ai.getCreaturesInPlay()) {
+            if (t == host || t.isTapped() || !t.hasSickness() || t.getNetPower() <= 0 || !sa.canTarget(t)) {
+                continue;
+            }
+            if (tapsHost && ComputerUtilCard.evaluateCreature(t) <= ComputerUtilCard.evaluateCreature(host)) {
+                continue;
+            }
+            // haste assumed (summoning sickness lifted) and the source tapped, for the time of the attack plan
+            final boolean hostWasTapped = tapsHost && host.isTapped();
+            boolean attacks;
+            t.setSickness(false);
+            if (tapsHost) {
+                host.setTapped(true);
+            }
+            try {
+                final forge.game.combat.Combat c1 = new forge.game.combat.Combat(ai);
+                new AiAttackController(ai).declareAttackers(c1);
+                attacks = c1.isAttacking(t);
+            } finally {
+                t.setSickness(true);
+                if (tapsHost) {
+                    host.setTapped(hostWasTapped);
+                }
+            }
+            if (attacks) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     protected AiAbilityDecision checkApiLogic(Player ai, SpellAbility sa) {
+        // magic-tools: Atog / Arcbound Ravager eat a nontoken artifact only for lethal (ArtifactSacAi)
+        if (TargetCarrierAi.isCarrier(sa)) {
+            return TargetCarrierAi.chooseTarget(ai, sa) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+        }
+        if (CantripPumpAi.isCantripPump(sa) && CantripPumpAi.goodTime(ai, sa, ai.getGame().getPhaseHandler())) {
+            return CantripPumpAi.chooseTarget(ai, sa, ai.getGame().getPhaseHandler())
+                    ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+        }
+        final Boolean artifactSac = ArtifactSacAi.decide(ai, sa);
+        if (artifactSac != null) {
+            return artifactSac ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         final Game game = ai.getGame();
         final Card source = sa.getHostCard();
         final SpellAbility root = sa.getRootAbility();
@@ -126,13 +214,17 @@ public class PumpAi extends PumpAiBase {
 
         final String aiLogic = sa.getParamOrDefault("AILogic", "");
 
-        final boolean isFight = "Fight".equals(aiLogic) || "PowerDmg".equals(aiLogic);
+        final boolean isFight = "Fight".equals(aiLogic) || "PowerDmg".equals(aiLogic)
+                || FightGrantAi.implicitFight(sa); // magic-tools: rule 187
         final boolean isBerserk = "Berserk".equals(aiLogic);
 
         if ("Pummeler".equals(aiLogic)) {
             return SpecialCardAi.ElectrostaticPummeler.consider(ai, sa);
         } else if (aiLogic.startsWith("AristocratCounters")) {
             // the preconditions to this are already tested in checkAiLogic
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        } else if ("Aristocrat".equals(aiLogic) && ThreatenSacAi.hasStolenFodder(ai, source)) {
+            // magic-tools: tested in checkAiLogic; the pump itself does not matter after combat
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         } else if ("GideonBlackblade".equals(aiLogic)) {
             return SpecialCardAi.GideonBlackblade.consider(ai, sa);
@@ -251,6 +343,10 @@ public class PumpAi extends PumpAiBase {
         }
 
         if (!game.getStack().isEmpty() && !sa.isCurse() && !isFight) {
+            // magic-tools: Undying Evil answers removal (UndyingSaveAi)
+            if (sa.usesTargeting() && UndyingSaveAi.grantsUndying(keywords) && UndyingSaveAi.chooseTarget(ai, sa)) {
+                return new AiAbilityDecision(100, AiPlayDecision.ResponseToStackResolve);
+            }
             return ComputerUtilCard.canPumpAgainstRemoval(ai, sa);
         }
 
@@ -263,7 +359,7 @@ public class PumpAi extends PumpAiBase {
             }
         }
 
-        if (sa.getSVar("X").equals("Count$xPaid")) {
+        if (sa.getSVar("X").equals("Count$xPaid") && !forge.ai.XTargets315Ai.keepX(ai, sa)) { // magic-tools: rule 315
             root.setXManaCostPaid(null);
         }
 
@@ -274,7 +370,7 @@ public class PumpAi extends PumpAiBase {
                 defense = -defense;
             }
         } else {
-            defense = AbilityUtils.calculateAmount(sa.getHostCard(), numDefense, sa);
+            defense = DoublePumpAi.fixedAmount(sa, numDefense); // magic-tools: rule 189
             if (numDefense.contains("X") && sa.getSVar("X").equals("Count$CardsInYourHand") && source.isInZone(ZoneType.Hand)) {
                 defense--; // the card will be spent casting the spell, so actual toughness is 1 less
             }
@@ -288,8 +384,7 @@ public class PumpAi extends PumpAiBase {
                 attack = root.getXManaCostPaid();
             }
         } else {
-            // TODO add Double
-            attack = AbilityUtils.calculateAmount(sa.getHostCard(), numAttack, sa);
+            attack = DoublePumpAi.fixedAmount(sa, numAttack); // magic-tools: rule 189
             if (numAttack.contains("X") && sa.getSVar("X").equals("Count$CardsInYourHand") && source.isInZone(ZoneType.Hand)) {
                 attack--; // the card will be spent casting the spell, so actual power is 1 less
             }
@@ -320,7 +415,8 @@ public class PumpAi extends PumpAiBase {
                     return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
                 }
                 if (!card.getController().isOpponentOf(ai)) {
-                    if (ComputerUtilCard.shouldPumpCard(ai, sa, card, defense, attack, keywords, false)) {
+                    if (ComputerUtilCard.shouldPumpCard(ai, sa, card, DoublePumpAi.defenseOn(sa, card, defense),
+                            DoublePumpAi.attackOn(sa, card, attack), keywords, false)) { // magic-tools: rule 189
                         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
                     }
                     if (containsUsefulKeyword(ai, keywords, card, sa, attack)) {
@@ -348,8 +444,48 @@ public class PumpAi extends PumpAiBase {
         if (pumpTgtAI(ai, sa, defense, attack, false, false)) {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
+        // magic-tools: rule 221
+        if (castForRiderAlone(ai, sa, defense, attack, keywords)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
 
         return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+    }
+
+    /**
+     * magic-tools: rule 221. "Up to one target creature gets -2/-2. Amass 2": the second half is worth the card
+     * whatever the first one finds. When no creature is worth cursing, cast it without a target in main 2.
+     * Only for riders that do not read the target; a target worth cursing keeps the normal way, which may hold it.
+     */
+    private boolean castForRiderAlone(final Player ai, final SpellAbility sa, final int defense, final int attack,
+                                      final List<String> keywords) {
+        final Game game = ai.getGame();
+        if (!sa.isSpell() || !sa.isCurse() || sa.getMinTargets() != 0 || !game.getStack().isEmpty()
+                || !game.getPhaseHandler().is(PhaseType.MAIN2, ai)) {
+            return false;
+        }
+        final SpellAbility rider = sa.getSubAbility();
+        if (rider == null || rider.getApi() == null || rider.hasParam("Condition") || rider.hasParam("ConditionCheckSVar")) {
+            return false;
+        }
+        switch (rider.getApi()) {
+            case Amass:
+            case Draw:
+            case Discover:
+                break;
+            case Token:
+                if (!"You".equals(rider.getParamOrDefault("TokenOwner", "You"))) {
+                    return false;
+                }
+                break;
+            default:
+                return false;
+        }
+        if (!getCurseCreatures(ai, sa, defense, attack, keywords).isEmpty()) {
+            return false;
+        }
+        sa.resetTargets();
+        return true;
     }
 
     private boolean pumpTgtAI(final Player ai, final SpellAbility sa, final int defense, final int attack, final boolean mandatory,
@@ -358,7 +494,8 @@ public class PumpAi extends PumpAiBase {
                 : Lists.newArrayList();
         final Game game = ai.getGame();
         final Card source = sa.getHostCard();
-        final boolean isFight = "Fight".equals(sa.getParam("AILogic")) || "PowerDmg".equals(sa.getParam("AILogic"));
+        final boolean isFight = "Fight".equals(sa.getParam("AILogic")) || "PowerDmg".equals(sa.getParam("AILogic"))
+                || FightGrantAi.implicitFight(sa); // magic-tools: rule 187
 
         immediately = immediately || ComputerUtil.playImmediately(ai, sa);
 
@@ -387,6 +524,11 @@ public class PumpAi extends PumpAiBase {
                 return false;
             }
             return true;
+        }
+
+        // magic-tools: rule 187, a Pump without AILogic that carries a Fight (Wayta, Prey Upon)
+        if (FightGrantAi.implicitFight(sa)) {
+            return FightAi.canFight(ai, sa, attack, defense).willingToPlay();
         }
 
         CardCollection list;
@@ -624,7 +766,7 @@ public class PumpAi extends PumpAiBase {
                 defense = root.getXManaCostPaid();
             }
         } else {
-            defense = AbilityUtils.calculateAmount(sa.getHostCard(), numDefense, sa);
+            defense = DoublePumpAi.fixedAmount(sa, numDefense); // magic-tools: rule 189
         }
 
         int attack;
@@ -636,7 +778,7 @@ public class PumpAi extends PumpAiBase {
                 attack = root.getXManaCostPaid();
             }
         } else {
-            attack = AbilityUtils.calculateAmount(sa.getHostCard(), numAttack, sa);
+            attack = DoublePumpAi.fixedAmount(sa, numAttack); // magic-tools: rule 189
         }
 
         if (!sa.usesTargeting()) {
@@ -692,7 +834,7 @@ public class PumpAi extends PumpAiBase {
                 attack = root.getXManaCostPaid();
             }
         } else {
-            attack = AbilityUtils.calculateAmount(sa.getHostCard(), numAttack, sa);
+            attack = DoublePumpAi.fixedAmount(sa, numAttack); // magic-tools: rule 189
         }
 
         int defense;
@@ -703,7 +845,7 @@ public class PumpAi extends PumpAiBase {
                 defense = root.getXManaCostPaid();
             }
         } else {
-            defense = AbilityUtils.calculateAmount(sa.getHostCard(), numDefense, sa);
+            defense = DoublePumpAi.fixedAmount(sa, numDefense); // magic-tools: rule 189
         }
 
         if (sa.usesTargeting()) {

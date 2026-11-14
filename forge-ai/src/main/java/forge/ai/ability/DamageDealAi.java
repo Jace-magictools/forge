@@ -12,8 +12,10 @@ import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
 import forge.game.card.*;
 import forge.game.cost.Cost;
+import forge.game.cost.CostPart;
 import forge.game.cost.CostPartMana;
 import forge.game.cost.CostPutCounter;
+import forge.game.cost.CostSacrifice;
 import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
@@ -91,6 +93,52 @@ public class DamageDealAi extends DamageAiBase {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
         return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
+    }
+
+    /**
+     * magic-tools: "Sacrifice a creature: N damage to any target" (Goblin Bombardment). The creatures we can sacrifice
+     * kill the weakest opponent, or a persist creature comes back endlessly (Melira, Sylvok Outcast): target that
+     * opponent. Sacrifice choice stays with ComputerUtil.chooseSacrificeType (SacMe first, then the worst creature).
+     */
+    private static boolean sacOutletIsLethal(final Player ai, final SpellAbility sa, final Cost abCost, final Card source, final int dmg) {
+        if (abCost == null || !sa.usesTargeting() || !sa.getTargetRestrictions().canTgtPlayer()) {
+            return false;
+        }
+        CostSacrifice sac = null;
+        boolean mana = false;
+        for (final CostPart part : abCost.getCostParts()) {
+            if (part instanceof CostSacrifice cs && !cs.payCostFromSource() && "1".equals(cs.getAmount())) {
+                sac = cs;
+            } else if (part instanceof forge.game.cost.CostPartMana && sa.isSpell()) {
+                mana = true; // magic-tools regle 100: burn spell with an additional sacrifice (Shrapnel Blast), one shot
+            } else {
+                return false; // only the plain sacrifice cost, nothing else to pay
+            }
+        }
+        if (sac == null) {
+            return false;
+        }
+        final Player opp = ai.getWeakestOpponent();
+        if (opp == null || !opp.canLoseLife() || opp.cantLoseForZeroOrLessLife() || !sa.canTarget(opp)) {
+            return false;
+        }
+        final int perShot = ComputerUtilCombat.predictDamageTo(opp, dmg, source, false);
+        if (perShot <= 0) {
+            return false;
+        }
+        CardCollection fodder = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield), sac.getType().split(";"), ai, source, sa);
+        fodder = CardLists.filter(fodder, CardPredicates.canBeSacrificedBy(sa, false));
+        if (fodder.isEmpty()) {
+            return false;
+        }
+        final boolean endless = fodder.anyMatch(c -> c.hasKeyword(Keyword.PERSIST) && !c.isToken()
+                && c.getCounters(CounterEnumType.M1M1) == 0 && !c.canReceiveCounters(CounterEnumType.M1M1));
+        if (mana ? perShot < opp.getLife() : !endless && (long) perShot * fodder.size() < opp.getLife()) {
+            return false;
+        }
+        sa.resetTargets();
+        sa.getTargets().add(opp);
+        return true;
     }
 
     @Override
@@ -228,6 +276,26 @@ public class DamageDealAi extends DamageAiBase {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
+        // magic-tools: sacrifice outlet dealing damage (Goblin Bombardment): fire at the opponent when it is lethal
+        if (sacOutletIsLethal(ai, sa, abCost, source, dmg)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+
+        // magic-tools: eat a creature stolen until end of turn (Tymaret): best target, else the opponent's face
+        // magic-tools: rule 116, same for a creature our own effect is about to sacrifice (unpaid echo, end step)
+        if (ThreatenSacAi.eatsStolenCreature(ai, sa) || forge.ai.OwnSacrificeAi.eatsDoomedCreature(ai, sa)) {
+            if (!sa.usesTargeting() || damageTargetAI(ai, sa, dmg, false)) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
+            sa.resetTargets();
+            for (final Player opp : ai.getOpponents()) {
+                if (sa.canTarget(opp)) {
+                    sa.getTargets().add(opp);
+                    return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+                }
+            }
+        }
+
         // temporarily disabled until better AI
         if (!ComputerUtilCost.checkLifeCost(ai, abCost, source, 4, sa)) {
             return new AiAbilityDecision(0, AiPlayDecision.CantAfford);
@@ -282,7 +350,12 @@ public class DamageDealAi extends DamageAiBase {
             if (sa.usesTargeting() && !sa.getTargets().isTargetingAnyPlayer() && !sa.isDividedAsYouChoose()) {
                 int actualPay = dmg;
                 final boolean noPrevention = sa.hasParam("NoPrevention");
-                for (final Card c : sa.getTargets().getTargetCards()) {
+                // magic-tools: rule 26, a Fireball split pays the largest need once per target
+                if (sa.hasParam("DivideEvenly") && sa.getTargets().size() > 1) {
+                    actualPay = DividedBurnAi.xToPay(sa.getTargets().getTargetCards(), dmg, sa, noPrevention);
+                }
+                for (final Card c : sa.hasParam("DivideEvenly") && sa.getTargets().size() > 1
+                        ? new CardCollection() : sa.getTargets().getTargetCards()) {
                     final int adjDamage = ComputerUtilCombat.getEnoughDamageToKill(c, dmg, source, false, noPrevention);
                     if (adjDamage < actualPay) {
                         actualPay = adjDamage;
@@ -518,6 +591,15 @@ public class DamageDealAi extends DamageAiBase {
         sa.resetTargets();
         TargetChoices tcs = sa.getTargets();
 
+        // magic-tools: rule 184, "you or target creature you control": a creature that survives rather than our face (D105)
+        if (ImposedDamageAi.applies(ai, sa)) {
+            return ImposedDamageAi.choose(ai, sa, dmg);
+        }
+        // magic-tools: rule 186, mandatory "you or another target creature you control": face before killing our own (D112)
+        if (ImposedDamageAi.appliesSelfTarget(ai, sa, mandatory)) {
+            return ImposedDamageAi.chooseSelfTarget(ai, sa, dmg);
+        }
+
         // Do not use if would kill self
         if ("SelfDamage".equals(logic) && ai.getLife() <= Integer.parseInt(source.getSVar("SelfDamageAmount"))) {
             return false;
@@ -567,6 +649,44 @@ public class DamageDealAi extends DamageAiBase {
 
         immediately = immediately || ComputerUtil.playImmediately(ai, sa);
 
+        // magic-tools: rule 54, burn that kills the opponent now goes to his face now (Magma Jet, Lightning Bolt)
+        if (!oppTargetsChoice && !divided && !avoidTargetP(ai, sa) && FaceBurnAi.killsNow(sa, enemy, dmg)) {
+            tcs.add(enemy);
+            return true;
+        }
+        // magic-tools: rule 55, divided burn that kills the opponent goes all to his face (Magic Missile, opponent at 1)
+        if (!oppTargetsChoice && divided && dmg > 0 && !avoidTargetP(ai, sa) && FaceBurnAi.killsNow(sa, enemy, dmg)) {
+            tcs.add(enemy);
+            sa.addDividedAllocation(enemy, dmg);
+            return true;
+        }
+
+        // magic-tools: rule 193, X paid in life and divided as we choose (Fire Covenant): buy only the kills worth their life
+        if (divided && !sa.costHasManaX() && "Count$xPaid".equals(sa.getSVar("X")) && tgt.canTgtCreature() && !tgt.canTgtPlayer()
+                && !oppTargetsChoice && sa.getPayCosts() != null && DividedBurnAi.isLifeOrGraveX(sa.getPayCosts())) {
+            final java.util.Map<Card, Integer> kills = DividedBurnAi.killsWorthTheirCost(ai, sa, dmg, noPrevention);
+            int paid = 0;
+            for (final java.util.Map.Entry<Card, Integer> kill : kills.entrySet()) {
+                tcs.add(kill.getKey());
+                sa.addDividedAllocation(kill.getKey(), kill.getValue());
+                paid += kill.getValue();
+            }
+            sa.setXManaCostPaid(paid);
+            return paid > 0;
+        }
+
+        // magic-tools: rule 26 (tester), Fireball is split (1+1) only if each target still dies, after lethal
+        if (sa.hasParam("DivideEvenly") && tgt.canTgtCreature() && !oppTargetsChoice
+                && !(tgt.canTgtPlayer() && shouldTgtP(ai, sa, dmg, noPrevention))) {
+            final List<Card> split = DividedBurnAi.chooseCreatures(ai, sa, dmg, noPrevention);
+            if (split.size() > 1) {
+                for (final Card c : split) {
+                    tcs.add(c);
+                }
+                return true;
+            }
+        }
+
         int totalTargetedSoFar = -1;
         while (sa.canAddMoreTarget()) {
             if (totalTargetedSoFar == tcs.size()) {
@@ -575,6 +695,11 @@ public class DamageDealAi extends DamageAiBase {
                 break;
             }
             totalTargetedSoFar = tcs.size();
+            // magic-tools: rule 26, a spell divided evenly (Fireball) keeps a single target: each extra one costs mana
+            // and splits the damage (Fireball X=2 on two creatures and Anafenza dealt 0 to each, ana22)
+            if (sa.hasParam("DivideEvenly") && !sa.getTargets().isEmpty()) {
+                break;
+            }
             if (oppTargetsChoice && sa.getActivatingPlayer().equals(ai) && !sa.isTrigger()) {
                 // canPlayAI (sa activated by ai)
                 Player targetingPlayer = AbilityUtils.getDefinedPlayers(source, sa.getParam("TargetingPlayer"), sa).get(0);
@@ -604,7 +729,14 @@ public class DamageDealAi extends DamageAiBase {
             }
 
             if (tgt.canTgtCreature() && tgt.canTgtPlayer()) {
-                if (shouldTgtP(ai, sa, dmg, noPrevention)) {
+                // magic-tools: rule 44, burn that can hit a creature goes to the face first (Lightning Bolt)
+                final boolean faceFirst = FaceBurnAi.isFaceFirst(ai, sa) && sa.canTarget(enemy)
+                        && !avoidTargetP(ai, sa) && enemy.canLoseLife()
+                        && ComputerUtilCombat.predictDamageTo(enemy, dmg, source, false) > 0;
+                if (faceFirst && !immediately && !mandatory && !FaceBurnAi.faceTiming(ai, sa)) {
+                    return false;
+                }
+                if (faceFirst || shouldTgtP(ai, sa, dmg, noPrevention)) {
                     tcs.add(enemy);
                     if (divided) {
                         sa.addDividedAllocation(enemy, dmg);
@@ -612,7 +744,9 @@ public class DamageDealAi extends DamageAiBase {
                     }
                     continue;
                 }
-                if ("RoundedDown".equals(sa.getParam("DivideEvenly"))) {
+                // magic-tools: rule 25, the first target of a spell divided evenly (Fireball) takes all the damage;
+                // the original formula gave it 0, so Fireball was never cast on a creature
+                if ("RoundedDown".equals(sa.getParam("DivideEvenly")) && !sa.getTargets().isEmpty()) {
                     dmg = dmg * sa.getTargets().size() / (sa.getTargets().size() +1);
                 }
 
@@ -635,6 +769,17 @@ public class DamageDealAi extends DamageAiBase {
                         if (dmg <= 0) {
                             break;
                         }
+                    }
+                    continue;
+                }
+
+                // magic-tools: rule 97, life in danger and no creature worth it: the face rather than dying with the spell
+                // rule 98: divided damage (Electrolyze), the rest after the creatures goes to the face
+                if (!immediately && !mandatory && dmg > 0 && FaceBurnAi.dangerFace(ai, sa, enemy, dmg)) {
+                    tcs.add(enemy);
+                    if (divided) {
+                        sa.addDividedAllocation(enemy, dmg);
+                        break;
                     }
                     continue;
                 }
@@ -698,7 +843,12 @@ public class DamageDealAi extends DamageAiBase {
                         || (isSorcerySpeed(sa, ai) && phase.is(PhaseType.MAIN2))
                         || ("BurnCreatures".equals(logic) && !enemy.getCreaturesInPlay().isEmpty()))
                         && ((sa.isPwAbility() && sa.getPayCosts().hasSpecificCostType(CostPutCounter.class))
-                        || shouldTgtP(ai, sa, dmg, noPrevention)))) {
+                        || shouldTgtP(ai, sa, dmg, noPrevention)
+                        // magic-tools: rule 40, a spell that can only hit players goes to the face (Lava Spike)
+                        || (FaceBurnAi.isFaceOnly(sa) && !avoidTargetP(ai, sa) && enemy.canLoseLife()
+                                && ComputerUtilCombat.predictDamageTo(enemy, dmg, source, false) > 0)))
+                        // magic-tools: rule 262, Arc Trail with no creature worth the damage: the face, the rest elsewhere
+                        || (!mandatory && !avoidTargetP(ai, sa) && FaceBurnAi.isTrailFace(ai, sa, enemy, dmg))) {
                     tcs.add(enemy);
                     if (divided) {
                         sa.addDividedAllocation(enemy, dmg);
@@ -711,6 +861,33 @@ public class DamageDealAi extends DamageAiBase {
         // fell through all the choices, no targets left?
         int minTgts = sa.getMinTargets();
         if (tcs.size() < minTgts || tcs.size() == 0) {
+            // magic-tools: rule 54, the spell already kills the opponent: its other target can be anything legal
+            // magic-tools: rule 262, the parent aims at the face: the other target is the opponent's best permanent
+            if (!mandatory && tcs.isEmpty() && FaceBurnAi.parentAtFace(ai, sa) && !FaceBurnAi.parentKillsOpponent(ai, sa)) {
+                for (final GameEntity ent : FaceBurnAi.trailTargets(ai, sa, null)) {
+                    if (tcs.size() < sa.getMaxTargets() && sa.canTarget(ent)) {
+                        tcs.add(ent);
+                    }
+                }
+                if (tcs.size() >= Math.max(1, minTgts)) {
+                    return true;
+                }
+                sa.resetTargets();
+                return false;
+            }
+            if (!mandatory && FaceBurnAi.parentKillsOpponent(ai, sa)) {
+                for (final GameEntity ent : sa.getTargetRestrictions().getAllCandidates(sa)) {
+                    if (tcs.size() < sa.getMaxTargets() && sa.canTarget(ent) && !tcs.contains(ent)
+                            && (ent instanceof Player pl ? pl.isOpponentOf(ai) : ((Card) ent).getController().isOpponentOf(ai))) {
+                        tcs.add(ent);
+                    }
+                }
+                if (tcs.size() >= Math.max(1, minTgts)) {
+                    return true;
+                }
+                sa.resetTargets();
+                return damageChooseRequiredTargets(ai, sa, tgt, dmg);
+            }
             if (mandatory) {
                 // Sanity check: if there are any legal non-owned targets after the check (which may happen for complex cards like Rift Bolt),
                 // choose a random opponent's target before forcing targeting of own stuff
