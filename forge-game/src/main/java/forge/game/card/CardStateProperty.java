@@ -1,6 +1,7 @@
 package forge.game.card;
 
 import forge.card.CardStateName;
+import forge.card.CardType;
 import forge.card.CardTypeView;
 import forge.card.ColorSet;
 import forge.card.MagicColor;
@@ -17,6 +18,10 @@ import java.util.Arrays;
 
 public class CardStateProperty {
     public static boolean hasProperty(CardState cardState, Player sourceController, Card source, String property, CardTraitBase spellAbility) {
+        // perf (31/10) : a creature type matches no branch below, only the type check at the end
+        if (CardType.isACreatureType(property)) {
+            return cardState.getTypeWithChanges().hasStringType(property);
+        }
         boolean withSource = property.endsWith("Source");
         final ColorSet colors;
         if (withSource && StaticAbilityColorlessDamageSource.colorlessDamageSource(cardState)) {

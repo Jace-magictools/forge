@@ -59,6 +59,10 @@ public class TriggerHandler {
         delayedTriggers.add(trig);
     }
 
+    public final List<Trigger> getDelayedTriggers() {
+        return Collections.unmodifiableList(delayedTriggers);
+    }
+
     public final void clearDelayedTrigger() {
         delayedTriggers.clear();
     }
@@ -346,6 +350,11 @@ public class TriggerHandler {
         }
 
         return checkStatics;
+    }
+
+    /** magic-tools, règle 17 : triggers held until the current resolution ends (read by the AI). */
+    public List<TriggerWaiting> getWaitingTriggers() {
+        return java.util.Collections.unmodifiableList(waitingTriggers);
     }
 
     public void clearWaitingTriggers() {
