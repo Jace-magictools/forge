@@ -40,6 +40,7 @@ import forge.game.ability.AbilityUtils;
 import forge.game.ability.ApiType;
 import forge.game.ability.SpellApiBased;
 import forge.game.card.*;
+import forge.game.combat.AttackRequirement;
 import forge.game.combat.Combat;
 import forge.game.combat.CombatUtil;
 import forge.game.cost.*;
@@ -256,6 +257,9 @@ public class AiController {
                         continue;
                     }
                 }
+                if (validCard.contains("PromisedGift") && !sa.isOptionalCostPaid(OptionalCost.PromiseGift)) {
+                    continue;
+                }
             }
 
             if (!re.requirementsCheck(game)) {
@@ -268,12 +272,25 @@ public class AiController {
 
                 // These checks only work if the Executing SpellAbility is an Ability_Sub.
                 if (exSA instanceof AbilitySub && !doTrigger(exSA, false)) {
+                    // magic-tools: rule 62, "as this enters, choose Sultai or Abzan" (Hollowmurk Siege)
+                    if (api == null && HarmlessEtbAi.isHarmless(exSA)) {
+                        continue;
+                    }
+                    // magic-tools: rule 119, an optional "enter as a copy" with nothing to copy just isn't used:
+                    // the creature still enters with its own body (Ezri Dax, Newly Joined, 2/2 flash, never cast)
+                    if (api == null && re.hasParam("Optional") && card.isCreature() && card.getNetToughness() > 0) {
+                        continue;
+                    }
                     return false;
                 }
             }
         }
 
         boolean rightapi = api == null;
+        // magic-tools: rule 63, an evoked creature is sacrificed at once: its ETB is all we get for a card or more
+        // (Solitude evoked on turn 1 with no creature to exile), so no "body is enough" escape and a real target needed
+        final boolean evoked = api == null && sa.isEvoke();
+        boolean evokeUseful = false;
 
         // Trigger play improvements
         for (final Trigger tr : card.getTriggers()) {
@@ -316,6 +333,10 @@ public class AiController {
                         continue;
                     }
                 }
+                // magic-tools: rule 45, an ETB that needs the gift (Scrapshooter, 33 cards) doesn't happen when the gift isn't promised
+                if (validCard.contains("PromisedGift") && !sa.isOptionalCostPaid(OptionalCost.PromiseGift)) {
+                    continue;
+                }
             }
 
             if (!tr.requirementsCheck(game)) {
@@ -323,7 +344,7 @@ public class AiController {
             }
 
             // if trigger is not mandatory - no problem
-            if (tr.hasParam("OptionalDecider") && api == null) {
+            if (tr.hasParam("OptionalDecider") && api == null && !evoked) {
                 continue;
             }
 
@@ -352,17 +373,42 @@ public class AiController {
                 }
             }
 
+            // magic-tools: rule 165, "return an Orc you control" with no other Orc bounces the card itself
+            if (api == null && !evoked && SelfBounceEtbAi.onlyItself(card, exSA, activator)) {
+                return false;
+            }
+
             // Run non-mandatory trigger.
             // These checks only work if the Executing SpellAbility is an Ability_Sub.
             if (exSA instanceof AbilitySub && !doTrigger(exSA, false)) {
+                if (evoked) {
+                    continue;
+                }
                 // AI would not run this trigger if given the chance
                 if (api == null && card.isCreature() && !ComputerUtilAbility.isFullyTargetable(exSA) &&
                         (ComputerUtil.aiLifeInDanger(activator, true, 0) || "BadETB".equals(tr.getParam("AILogic")))) {
                     // trigger will not run due to lack of targets and we 1. desperately need a creature or 2. are happy about that
                     continue;
                 }
+                // magic-tools: a trigger we would skip now but that cannot hurt us does not keep the card in hand
+                // (rule 62: nor one that has no legal target at all, the creature comes without it)
+                if (api == null && (HarmlessEtbAi.isHarmless(exSA) || HarmlessEtbAi.hasNoTargetAtAll(exSA, card)
+                        || HarmlessEtbAi.isSelfTargetablePump(exSA, card))) {
+                    continue;
+                }
+                // magic-tools: Lobelia without a dead creature is still a 2/3 menace (TreasureFlashAi times it)
+                if (api == null && TreasureFlashAi.applies(card) && !ComputerUtilAbility.isFullyTargetable(exSA)) {
+                    continue;
+                }
                 return false;
             }
+            // (the evoke sacrifice trigger itself is no gain)
+            if (evoked && !tr.isKeyword(Keyword.EVOKE) && (!exSA.usesTargeting() || exSA.getTargets().size() > 0)) {
+                evokeUseful = true;
+            }
+        }
+        if (evoked && !evokeUseful) {
+            return false;
         }
 
         if (card.isSaga()) {
@@ -378,6 +424,10 @@ public class AiController {
                 }
 
                 if (exSA instanceof AbilitySub && !doTrigger(exSA, false)) {
+                    // magic-tools: rule 62, a chapter that cannot hurt us (Michiko's Reign of Truth: pump target creature)
+                    if (api == null && HarmlessEtbAi.isHarmless(exSA)) {
+                        break;
+                    }
                     // AI would not run this chapter if given the chance
                     // TODO eventually we'll want to consider playing it anyway, especially if Read ahead would still allow an immediate benefit
                     return false;
@@ -405,6 +455,10 @@ public class AiController {
     }
 
     private CardCollection filterLandsToPlay(CardCollection landList) {
+        // magic-tools: rule 29, keep the land in hand so that the cleanup discards the fatty to reanimate
+        if (ReanimatorAi.skipLandDropToDiscard(player)) {
+            return null;
+        }
         final CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
         CardCollection nonLandList = CardLists.filter(hand, CardPredicates.NON_LANDS);
         if (landList.size() == 1 && nonLandList.size() < 3) {
@@ -420,7 +474,8 @@ public class AiController {
                 for (Card c : allCards) {
                     for (SpellAbility sa : c.getSpellAbilities()) {
                         Cost payCosts = sa.getPayCosts();
-                        if (payCosts != null) {
+                        // magic-tools: rule 212, only an ability usable from where the card is keeps the land in hand
+                        if (payCosts != null && DiscardOutletAi.usableFromItsZone(c, sa)) {
                             for (CostPart part : payCosts.getCostParts()) {
                                 if (part instanceof CostDiscard) {
                                     return null;
@@ -437,6 +492,10 @@ public class AiController {
         landList = CardLists.filter(landList, c -> {
             String name = c.getName();
             CardCollectionView battlefield = player.getCardsIn(ZoneType.Battlefield);
+            // magic-tools: rule 12, no land drop that makes City of Traitors (and the like) sacrifice itself for less mana
+            if (LandDropSacAi.losesMana(player, c)) {
+                return false;
+            }
             if (c.getType().isLegendary() && !name.equals("Flagstones of Trokair")) {
                 if (battlefield.anyMatch(CardPredicates.nameEquals(name))) {
                     return false;
@@ -512,9 +571,16 @@ public class AiController {
             landList = unreflectedLands;
         }
 
+        // magic-tools: rule 86, two different Urza lands: the missing Tron pieces before anything else (TronAi)
+        CardCollection tronPieces = TronAi.piecesFirst(player, landList);
+        if (!tronPieces.isEmpty()) {
+            landList = tronPieces;
+        }
+
         // try to skip lands that enter the battlefield tapped if we might want to play something this turn
         if (!nonLandsInHand.isEmpty()) {
             CardCollection nonTappedLands = new CardCollection();
+            CardCollection shockLands = new CardCollection(); // magic-tools: rule 205
             for (Card land : landList) {
                 // check replacement effects if land would enter tapped or not
                 final Map<AbilityKey, Object> repParams = AbilityKey.mapFromAffected(land);
@@ -536,6 +602,9 @@ public class AiController {
                     reSA.setActivatingPlayer(reSA.getHostCard().getController());
                     if (reSA.metConditions()) {
                         foundTapped = true;
+                        if (TapLandColorAi.paysLifeForUntapped(reSA)) {
+                            shockLands.add(land);
+                        }
                         break;
                     }
                 }
@@ -548,11 +617,21 @@ public class AiController {
                 nonTappedLands.add(land);
             }
 
-            // if we have the choice, see if we can play an untapped land
-            if (!nonTappedLands.isEmpty()) {
+            // magic-tools: rule 205, a shockland that casts more than any untapped land would
+            CardCollection unlocking = new CardCollection();
+            for (Card land : shockLands) {
+                if (player.getLife() > 4 && TapLandColorAi.shockUnlocks(player, land, nonTappedLands, nonLandsInHand)) {
+                    unlocking.add(land);
+                }
+            }
+            if (!unlocking.isEmpty()) {
+                landList = unlocking;
+            } else if (!nonTappedLands.isEmpty()) {
+                // if we have the choice, see if we can play an untapped land
                 // If we have a lot of mana, prefer untapped lands.
                 // We're either topdecking or have drawn enough the tempo no longer matters.
-                int mana_available = getAvailableManaEstimate(player);
+                // magic-tools: rule 66, costed mana abilities count only if payable
+                int mana_available = TapLandColorAi.landPlayManaEstimate(player);
                 if (mana_available > 6) {
                     landList = nonTappedLands;
                 } else {
@@ -566,19 +645,43 @@ public class AiController {
                     if (max_inc > 0) {
                         boolean found = false;
                         for (Card c : nonLandsInHand) {
+                            // magic-tools: rule 250, a spell with nothing to target is no use for the mana
+                            if (TapLandColorAi.idleCard(player, c)) {
+                                continue;
+                            }
                             // TODO make this work better with split cards and Monocolored Hybrid
                             ManaCost cost = c.getManaCost();
                             // check for incremental cmc
                             // check for X cost spells
+                            // magic-tools: rule 89, or the {2} to foretell it
                             if ((cost.getCMC() - mana_available) * (cost.getCMC() - mana_available - max_inc - 1) < 0 ||
-                                    (cost.countX() > 0 && cost.getCMC() >= mana_available)) {
+                                    (cost.countX() > 0 && cost.getCMC() >= mana_available)
+                                    || TapLandColorAi.foretellsWith(c, mana_available, max_inc)) {
                                 found = true;
                                 break;
                             }
                         }
 
+                        CardCollection useful = new CardCollection();
                         if (found) {
-                            landList = nonTappedLands;
+                            // magic-tools: rule 21, only the untapped lands that bring the colors of that spell
+                            useful = TapLandColorAi.usefulUntappedLands(player, nonTappedLands, nonLandsInHand, mana_available);
+                            if (!useful.isEmpty()) {
+                                landList = useful;
+                            }
+                        }
+                        if (useful.isEmpty()) {
+                            // magic-tools: rule 69, nothing new to cast: the slow land first
+                            CardCollection slow = TapLandColorAi.slowLandsIfIdle(player, landList, nonTappedLands, nonLandsInHand, mana_available);
+                            if (!slow.isEmpty()) {
+                                landList = slow;
+                            } else {
+                                // magic-tools: rule 250, the untapped lands whose mana is spent this turn
+                                CardCollection spent = TapLandColorAi.untappedForSpend(player, nonTappedLands, nonLandsInHand, mana_available);
+                                if (!spent.isEmpty()) {
+                                    landList = spent;
+                                }
+                            }
                         }
                     }
                 }
@@ -674,6 +777,9 @@ public class AiController {
                         int diff = (card_counts[i] * 50) / (counts[i] + 1);
                         score += diff;
                     }
+
+                    // magic-tools: rule 38, a fetchland is worth one mana of the best color it can find
+                    score += FetchLandPlayAi.fetchScore(player, card, counts);
 
                     // TODO utility lands only if we have enough to pay their costs
                     // TODO Tron lands and other lands that care about land counts
@@ -900,7 +1006,13 @@ public class AiController {
             Sentry.setExtra("Card", card.getName());
             Sentry.setExtra("SA", sa.toString());
 
-            boolean canPlay = SpellApiToAi.Converter.get(sa).canPlayWithSubs(player, sa).willingToPlay();
+            // magic-tools: endless persist loop (Melira + Murderous Redcap + free sacrifice outlet)
+            boolean canPlay = UnlockWin314Ai.shouldPlay(player, sa) // magic-tools: rule 314, remove the opponent's last "can't lose"
+                    || PersistLoopAi.shouldLoop(player, sa)
+                    || SacUntapLoopAi.shouldLoop(player, sa) // magic-tools: rule 145, sacrifice-untap loop
+                    || DamageTokenLoopAi.shouldLoop(player, sa) // magic-tools: rule 149, damage-token-counter loop
+                    || SacManaLoopAi.shouldLoop(player, sa) // magic-tools: rule 152, sacrifice-for-mana drain loop
+                    || canPlayXTargets(sa);
 
             // remove added extra
             Sentry.removeExtra("Card");
@@ -959,7 +1071,14 @@ public class AiController {
         return saSideEffects(spellHost, sa);
     }
 
-    private AiPlayDecision saSideEffects(final Card card, final SpellAbility sa) {
+    // magic-tools: rule 315, an ability that pays {X} for X targets is never activated at X=0
+    private boolean canPlayXTargets(SpellAbility sa) {
+        Boolean x = XTargets315Ai.canPlay(player, sa);
+        return x != null ? x : SpellApiToAi.Converter.get(sa).canPlayWithSubs(player, sa).willingToPlay();
+    }
+
+    // magic-tools: package-private for BourdeWatcher (why a payable permanent stayed in hand)
+    AiPlayDecision saSideEffects(final Card card, final SpellAbility sa) {
         if (usesHybridSimulation()) {
             return OnePlaySafetyChecker.isAcceptable(player, sa) ? AiPlayDecision.WillPlay : AiPlayDecision.HybridSimRejected;
         }
@@ -986,12 +1105,80 @@ public class AiController {
         }
         if (card.isPermanent() && !sa.isMutate()) {
             damage += ComputerUtil.getDamageFromETB(player, card);
-            if (damage >= player.getLife()) {
+            // magic-tools: rule 170 (relevé « mana perdu » v207, Eldratron - Avacyn t14-46 : à -7 sous Platinum Angel,
+            // Eldratron a gardé Darksteel Ingot, Trinket et Trophy Mage 16 tours) : 0 blessure >= -7 vies refusait tout
+            // permanent ; ne pas perdre à 0 vie ou moins, ou ne prendre aucune blessure, ne tue pas
+            if (damage > 0 && !player.cantLoseForZeroOrLessLife() && damage >= player.getLife()) {
                 return AiPlayDecision.BadEtbEffects;
             }
             if (!sa.isLandAbility() && !checkETBEffects(card, sa, null)) {
                 return AiPlayDecision.BadEtbEffects;
             }
+        }
+
+        if (!PactAi.canPayAllPacts(player, sa)) {
+            return AiPlayDecision.CantAfford;
+        }
+
+        // magic-tools: rule 109, a free spell waits to be cast before the Storm card of the hand
+        if (StormFuelAi.holdForStorm(player, sa)) {
+            return AiPlayDecision.AnotherTime;
+        }
+
+        // magic-tools: no {3} face-down 2/2 for a cheap creature (Birchlore Rangers)
+        if (!MorphAi.worthCastingFaceDown(sa)) {
+            return AiPlayDecision.CurseEffects;
+        }
+
+        // magic-tools: no creature spell whose forced draws would empty the library (Beast Whisperer, Glimpse of Nature)
+        if (DeckOutAi.wouldDeckSelf(player, sa)) {
+            return AiPlayDecision.CurseEffects;
+        }
+
+        // magic-tools: rule 249, under pressure the mana of the sweeper in hand is not spent on something else
+        final Card sweeperKept = SweeperUnderPressure249.sweeperKept(player, sa);
+        if (sweeperKept != null) {
+            if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+                System.out.printf("MT Hold: %s keeps mana for %s, holds %s%n", player.getName(), sweeperKept.getName(), card.getName());
+            }
+            return AiPlayDecision.AnotherTime;
+        }
+
+        // magic-tools: rule 251, no defender before a creature that competes for its mana when no creature faces us
+        // magic-tools: rule 253, a mana rock that costs mana this turn waits for the bigger spell it would leave unpaid
+        final Card rockKept = RockBeforeCurve253.rockKept(player, sa);
+        if (rockKept != null) {
+            if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+                System.out.printf("MT Hold: %s keeps mana for %s, holds %s%n", player.getName(), rockKept.getName(), card.getName());
+            }
+            return AiPlayDecision.AnotherTime;
+        }
+
+        // magic-tools: rule 258, a draw spell that overfills the hand waits for the spell it would leave unpaid
+        final Card drawKept = DrawFullHand258.drawKept(player, sa);
+        if (drawKept != null) {
+            if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+                System.out.printf("MT Hold: %s keeps mana for %s, holds %s%n", player.getName(), drawKept.getName(), card.getName());
+            }
+            return AiPlayDecision.AnotherTime;
+        }
+
+        final Card wallKept = IdleWall251.wallKept(player, sa);
+        if (wallKept != null) {
+            if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+                System.out.printf("MT Hold: %s keeps mana for %s, holds %s%n", player.getName(), wallKept.getName(), card.getName());
+            }
+            return AiPlayDecision.AnotherTime;
+        }
+
+        // magic-tools: rule 22, keep the mana of a counterspell in hand for the opponent's turn
+        final Card counterKept = CounterReserveAi.counterKept(player, sa);
+        if (counterKept != null) {
+            if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+                // read by scripts/forge/partie.py: "garde son mana pour X, ne lance pas Y"
+                System.out.printf("MT Hold: %s keeps mana for %s, holds %s%n", player.getName(), counterKept.getName(), card.getName());
+            }
+            return AiPlayDecision.AnotherTime;
         }
 
         return ComputerUtilCard.checkNeedsToPlayReqs(card, sa);
@@ -1040,6 +1227,11 @@ public class AiController {
         if (neededMana < 0) {
             neededMana = 0;
         }
+        // magic-tools: rule 171 (Spell Burst, X U + buyback 3) : X se paie aussi ; à 4 terrains contre un sort de valeur 3,
+        // la version buyback ne pouvait payer que X = 0 et la version simple était refusée : le contre ne partait jamais
+        if (sa.getPayCosts().getTotalMana() != null && sa.getPayCosts().getTotalMana().countX() > 0) {
+            neededMana += XCounterAi.xWanted(sa);
+        }
 
         int hasMana = getAvailableManaEstimate(player, false);
         if (hasMana < neededMana - 1) {
@@ -1065,6 +1257,15 @@ public class AiController {
     public CardCollection getCardsToDiscard(int min, final int max, final CardCollection validCards, final SpellAbility sa) {
         if (validCards.size() <= min) {
             return validCards; //return all valid cards since they will be discarded without filtering needed
+        }
+        // magic-tools: Magus of the Bazaar discards the embalm / eternalize cards and spare lands first (Oasis)
+        if (BazaarAi.isBazaar(sa)) {
+            return BazaarAi.chooseDiscards(this, player, sa, min, max, validCards);
+        }
+        // magic-tools: rule 263, the deck plan keeps its key cards while another card can go
+        final CardCollection planKeep = DeckPlanAi.keepForDiscard(player, validCards, min);
+        if (planKeep != null) {
+            return getCardsToDiscard(min, max, planKeep, sa);
         }
 
         Card sourceCard = null;
@@ -1147,7 +1348,21 @@ public class AiController {
             }
         }
 
+        // magic-tools: rule 113, a madness card we can cast right away goes first
+        while (count < min) {
+            final Card madness = MadnessDiscardAi.choose(player, validCards, sa);
+            if (madness == null) {
+                break;
+            }
+            discardList.add(madness);
+            validCards.remove(madness);
+            count++;
+        }
+
         final int discardsLeft = min - count;
+
+        // magic-tools: rule 136, keep the card that discarding makes cheap (Asmoranomardicadaistinaculdacar)
+        validCards.removeAll(DiscardEnabledAi.keep(player, validCards, discardsLeft));
 
         // choose rest
         for (int i = 0; i < discardsLeft; i++) {
@@ -1295,7 +1510,11 @@ public class AiController {
 
     // declares blockers for given defender in a given combat
     public void declareBlockersFor(Player defender, Combat combat) {
-        AiBlockController block = new AiBlockController(defender, defender != player);
+        // magic-tools: Odric, Master Tactician: we choose the opponent's blockers, block for our own benefit
+        if (OdricBlockAi.declaresForOpponent(player, defender) && OdricBlockAi.declareBlockers(player, defender, combat)) {
+            return;
+        }
+        AiBlockController block = new AiBlockController(defender, player);
         // When player != defender, AI should declare blockers for its benefit.
         block.assignBlockersForCombat(combat);
     }
@@ -1310,6 +1529,16 @@ public class AiController {
         // Per CR 508.1d, the decision to pay attack costs (e.g. Propaganda)
         // is made at declaration time. Remove attackers the AI can't pay for.
         removeUnpayableAttackers(combat);
+
+        // magic-tools: rule 112, a battle cry creature with 0 power (Signal Pest) doesn't attack alone
+        if (combat.getAttackers().size() == 1) {
+            Card lone = combat.getAttackers().get(0);
+            AttackRequirement req = combat.getAttackConstraints().getRequirements().get(lone);
+            if ((req == null || !req.hasRequirement())
+                    && AiAttackController.onlySupportsOtherAttackers(attacker, lone, combat)) {
+                combat.removeFromCombat(lone);
+            }
+        }
 
         // if invalid: just try an attack declaration that we know to be legal
         if (!CombatUtil.validateAttackers(combat)) {
@@ -1349,7 +1578,7 @@ public class AiController {
     }
 
     public List<SpellAbility> chooseSpellAbilityToPlay() {
-        AiCache.clear();
+        AiCache.clear(AiCache.Scope.PRIORITY);
         // Reset cached predicted combat, as it may be stale. It will be
         // re-created if needed and used for any AI logic that needs it.
         predictedCombat = null;
@@ -1363,9 +1592,18 @@ public class AiController {
             return singleSpellAbilityList(simPicker.chooseSpellAbilityToPlay(null));
         }
 
+        // magic-tools: rule 140, an untap loop with a net mana gain (two Myr Galvanizer + Palladium Myr) as a shortcut
+        UntapLoopAi.maybeShortcut(player);
+
         CardCollection playBeforeLand = CardLists.filter(
                 player.getCardsIn(ZoneType.Hand), CardPredicates.hasSVar("PlayBeforeLandDrop")
         );
+        // magic-tools: rule 259, a landfall payoff of the hand is offered before the land drop it would count
+        for (final Card c : LandfallFirst259.beforeLand(player)) {
+            if (!playBeforeLand.contains(c)) {
+                playBeforeLand.add(c);
+            }
+        }
         if (!playBeforeLand.isEmpty()) {
             SpellAbility wantToPlayBeforeLand = chooseSpellAbilityToPlayFromList(
                     ComputerUtilAbility.getSpellAbilities(playBeforeLand, player), false
@@ -1375,12 +1613,31 @@ public class AiController {
             }
         }
 
+        // magic-tools: rule 278, an ability that puts lands from the hand onto the battlefield goes before the land drop
+        final List<SpellAbility> putters278 = LandReplayAi.beforeLand(player);
+        if (!putters278.isEmpty()) {
+            SpellAbility putter = chooseSpellAbilityToPlayFromList(putters278, false);
+            if (putter != null) {
+                return singleSpellAbilityList(putter);
+            }
+        }
+
         CardCollection landsWannaPlay = ComputerUtilAbility.getAvailableLandsToPlay(game, player);
         if (landsWannaPlay != null) {
             landsWannaPlay = filterLandsToPlay(landsWannaPlay);
             if (landsWannaPlay != null && !landsWannaPlay.isEmpty()) {
                 // TODO search for other land it might want to play?
-                Card land = chooseBestLandToPlay(landsWannaPlay);
+                // magic-tools: rule 103, the lands our payoff in hand would count wait for it when another land can go
+                landsWannaPlay = ArrivalPayoffAi.landsAfterPayoff(player, landsWannaPlay);
+                // magic-tools: rule 106, no land that feeds the opponent's Land Tax when it brings nothing now
+                Card land = LandTaxAi.holdLandDrop(player, landsWannaPlay) ? null : chooseBestLandToPlay(landsWannaPlay);
+                // magic-tools: rule 72, a bounce land waits for the spells castable now, and for main 2 (KarooAi)
+                if (land != null && KarooAi.isKaroo(land) && game.getPhaseHandler().getPhase().isMain()) {
+                    SpellAbility before = getSpellAbilityToPlay();
+                    if (before != null || game.getPhaseHandler().is(PhaseType.MAIN1)) {
+                        return singleSpellAbilityList(before);
+                    }
+                }
                 if (land != null && (!game.getPhaseHandler().is(PhaseType.MAIN1) || !isSafeToHoldLandDropForMain2(land))) {
                     final List<SpellAbility> abilities = land.getAllPossibleAbilities(player, true);
                     // skip non Land Abilities
@@ -1534,6 +1791,10 @@ public class AiController {
         if (top != null) {
             mustRespond = top.hasParam("AIRespondsToOwnAbility"); // Forced combos (currently defined for Sensei's Divining Top)
             mustRespond |= top.isTrigger() && top.getTrigger().isKeyword(Keyword.EVOKE); // Evoke sacrifice trigger
+            // magic-tools: rule 116, any own mandatory "sacrifice this" (unpaid echo, end step): feed an outlet first
+            mustRespond |= OwnSacrificeAi.threatensHost(player, null, top.isWrapper() ? ((WrappedAbility) top).getWrappedAbility() : top);
+            // magic-tools: rule 167, our own effect threatens a permanent of ours that can still be used in response
+            mustRespond |= topOwnedByAI && OwnThreatResponseAi.mustAnswerOwn(player);
         }
 
         if (topOwnedByAI) {
@@ -1558,6 +1819,13 @@ public class AiController {
                 return counterETB;
         }
 
+        // magic-tools: rule 52, lethal on the table in main 1: go to combat first, the spells wait for main 2
+        // (ElfBall tapped its pumped elves for mana in main 1 and never attacked for 15 to 41 damage)
+        if (game.getStack().isEmpty() && game.getPhaseHandler().is(PhaseType.MAIN1, player)
+                && new AiAttackController(player).isLethalAssault()) {
+            return null;
+        }
+
         if (saList.isEmpty()) {
             saList = ComputerUtilAbility.getSpellAbilities(cards, player);
         }
@@ -1565,7 +1833,11 @@ public class AiController {
         saList.removeIf(spellAbility -> {
             // don't include removedAI cards if somehow the AI can play the ability or gain control of unsupported card
             // TODO allow when experimental profile?
-            return spellAbility.isLandAbility() || (spellAbility.getHostCard() != null && ComputerUtilCard.isCardRemAIDeck(spellAbility.getHostCard()));
+            // magic-tools: rule 46, the deck chose the card, so a permanent spell marked AI:RemoveDeck:All is still cast
+            // (stats, static and triggers work without the AI); only its activated abilities stay out of reach
+            return spellAbility.isLandAbility() || (spellAbility.getHostCard() != null && ComputerUtilCard.isCardRemAIDeck(spellAbility.getHostCard())
+                    && !isRemovedPermanentSpell(spellAbility) && !isRemovedPermanentAbility(spellAbility)
+                    && !isRemovedSimpleSpell(spellAbility));
         });
         //removed skipped SA
         skipped = saList.stream().filter(SpellAbility::isSkip).collect(Collectors.toList());
@@ -1583,6 +1855,77 @@ public class AiController {
         return chosenSa;
     }
 
+    // magic-tools: rule 46, the cast of a permanent card from hand (not its abilities)
+    /**
+     * magic-tools: rule 95, the activated abilities of such a permanent once it is in play (Memory Jar never
+     * activated, Dovin and Gideon never used their loyalty, Engineered Explosives never popped): each API's own
+     * logic judges them like any other ability. Mana abilities already worked.
+     */
+    public static boolean isRemovedPermanentAbility(final SpellAbility sa) {
+        // magic-tools: rule 219, except a mana ability with a mana cost: the payment code skips it (ManaFilterAi activates
+        // it beforehand), so it did not work: Interplanar Beacon never gave Dovin its blue
+        return sa.isActivatedAbility() && (!sa.isManaAbility() || ManaFilterAi.isFilter(sa))
+                && sa.getHostCard().isInZone(ZoneType.Battlefield);
+    }
+
+    /**
+     * magic-tools: rule 118, an instant or sorcery marked AI:RemoveDeck:All whose effect the generic AI already judges
+     * (damage, destroy, draw) and that costs only mana is cast too: Hobbit's Sting stayed in hand 1 650 steps over
+     * 4 games with killable targets, Beast Within and Decree of Pain likewise. Other APIs (choices, sacrifices,
+     * animations) stay out of reach.
+     */
+    public static boolean isRemovedSimpleSpell(final SpellAbility sa) {
+        if (!sa.isSpell() || sa.getHostCard() == null || !sa.getHostCard().isInZone(ZoneType.Hand)
+                || sa.getCardState() == null || sa.getCardState().getType().isPermanent()) {
+            return false;
+        }
+        // magic-tools: rule 191, -X/-X with a chosen X (Toxic Deluge pays it in life) is judged by ThresholdSweepAi
+        if (sa.getApi() == ApiType.PumpAll && ThresholdSweepAi.isMinusXSweep(sa)) {
+            return true;
+        }
+        // magic-tools: rule 192, one permanent sacrificed on top of the mana (Improvised Club, Death Bomb, Vivisection):
+        // the general sacrifice rules (FodderAi, RemovalSacAi) only pay it when it is worth it
+        if (sa.getPayCosts() != null && isManaAndOneSacrifice(sa.getPayCosts())
+                && (sa.getApi() == ApiType.DealDamage || sa.getApi() == ApiType.Destroy || sa.getApi() == ApiType.Draw)) {
+            return true;
+        }
+        // magic-tools: rule 193, damage with X paid in life or from the graveyard (Fire Covenant, Harvest Pyre):
+        // DamageDealAi reads X from the cost and pays only what kills
+        if (sa.getApi() == ApiType.DealDamage && sa.getPayCosts() != null && DividedBurnAi.isLifeOrGraveX(sa.getPayCosts())) {
+            return true;
+        }
+        if (sa.getPayCosts() == null || !sa.getPayCosts().isOnlyManaCost()) {
+            return false;
+        }
+        final ApiType api = sa.getApi();
+        // magic-tools: rule 181, energy that pays a sweep (Wrath of the Skies) is judged by ThresholdSweepAi
+        return api == ApiType.DealDamage || api == ApiType.Destroy || api == ApiType.DestroyAll || api == ApiType.Draw
+                || (api == ApiType.PutCounter && ThresholdSweepAi.energySweepIn(sa) != null);
+    }
+
+    private static boolean isManaAndOneSacrifice(final Cost cost) {
+        int sacrifices = 0;
+        for (final CostPart part : cost.getCostParts()) {
+            if (part instanceof CostSacrifice) {
+                if (part.payCostFromSource() || !"1".equals(part.getAmount())) {
+                    return false;
+                }
+                sacrifices++;
+            } else if (!(part instanceof CostPartMana)) {
+                return false;
+            }
+        }
+        return sacrifices == 1;
+    }
+
+    static boolean isRemovedPermanentSpell(final SpellAbility sa) {
+        return sa.isSpell() && sa.getHostCard().isInZone(ZoneType.Hand) && sa.getCardState() != null
+                && sa.getCardState().getType().isPermanent();
+    }
+
+    // Diagnostic local (Magic Tools) : FORGE_AI_TRACE=<nom du joueur> affiche la main, le cimetière et l'avis de l'IA sur chaque sort.
+    private static final String AI_TRACE = System.getenv("FORGE_AI_TRACE");
+
     private SpellAbility chooseSpellAbilityToPlayFromList(final List<SpellAbility> all, boolean skipCounter) {
         if (all == null || all.isEmpty())
             return null;
@@ -1590,15 +1933,51 @@ public class AiController {
         try {
             all.sort(ComputerUtilAbility.saEvaluator); // put best spells first
             ComputerUtilAbility.sortCreatureSpells(all);
+            // magic-tools: mana creatures before same-cost creatures when a bigger spell waits in hand
+            ManaRampAi.prioritize(player, all);
+            // magic-tools: rule 263, the spell that completes a combo of the deck plan goes first
+            DeckPlanAi.prioritize(player, all);
+            // magic-tools: rule 196, the creature spell that starts the longest chain paid by tapping Elves
+            TapEngineAi.prioritize(player, all);
+            // magic-tools: rule 206, the cheap spells of the type when « tap N of the type » is within reach
+            TapGoalAi.prioritize(player, all);
+            // magic-tools: assemble the persist loop with Birthing Pod before the mana goes into creature spells
+            for (int i = 1; i < all.size(); i++) {
+                if (PodComboAi.plan(player, all.get(i)) != null) {
+                    all.add(0, all.remove(i));
+                }
+            }
+            // magic-tools: rule 110, a haste equipment goes on the creature cast this turn before the next spell
+            HasteAttachAi.prioritize(player, all);
+            // magic-tools: rule 108, floating ritual mana goes to the biggest spell of the hand first
+            StormRitualAi.prioritize(player, all);
+            // magic-tools: rule 265, the blocker of an evasive attacker that kills us next turn goes first
+            EvasiveBlocker265.prioritize(player, all);
+            // magic-tools: rule 26, a lethal X damage spell goes before the creatures that would eat its mana
+            LethalBurnAi.prioritize(player, all);
+            // magic-tools: rule 314, removing the permanent that alone keeps a dead opponent alive goes first
+            UnlockWin314Ai.prioritize(player, all);
         } catch (IllegalArgumentException ex) {
             System.err.println(ex.getMessage());
             String assertex = ComparatorUtil.verifyTransitivity(ComputerUtilAbility.saEvaluator, all);
             Sentry.captureMessage(ex.getMessage() + "\nAssertionError [verifyTransitivity]: " + assertex);
         }
 
+        if (AI_TRACE != null && player.getName().contains(AI_TRACE)) {
+            // position adverse en fin de ligne (premier adversaire) : créatures, terrains, cartes en main, points de vie
+            Player adv = player.getWeakestOpponent();
+            System.out.printf("AI_TRACE %s T%d %s main=%s cimetiere=%s creatures=%s terrains_libres=%d soi=%b adv_creatures=%s adv_terrains=%d adv_main=%d vies=%d/%d%n", player.getName(), game.getPhaseHandler().getTurn(),
+                    game.getPhaseHandler().getPhase(), player.getCardsIn(ZoneType.Hand), player.getCardsIn(ZoneType.Graveyard),
+                    player.getCreaturesInPlay(), CardLists.count(player.getCardsIn(ZoneType.Battlefield), c -> c.isLand() && !c.isTapped()),
+                    game.getPhaseHandler().isPlayerTurn(player),
+                    adv == null ? "[]" : adv.getCreaturesInPlay(), adv == null ? 0 : adv.getLandsInPlay().size(),
+                    adv == null ? 0 : adv.getCardsIn(ZoneType.Hand).size(), player.getLife(), adv == null ? 0 : adv.getLife());
+        }
         FutureTask<SpellAbility> future = new FutureTask<>(() -> {
             //avoid ComputerUtil.aiLifeInDanger in loops as it slows down a lot.. call this outside loops will generally be fast...
             boolean isLifeInDanger = useLivingEnd && ComputerUtil.aiLifeInDanger(player, true, 0);
+            // magic-tools: rule 108, Storm spells skipped while other spells wait in hand
+            final List<SpellAbility> stormWaiting = new ArrayList<>();
             for (final SpellAbility sa : ComputerUtilAbility.getOriginalAndAltCostAbilities(all, player)) {
                 if (Thread.currentThread().isInterrupted()) {
                     break;
@@ -1616,6 +1995,7 @@ public class AiController {
                     )) {
                     if (game.getView().getStormCount() < this.getIntProperty(AiProps.MIN_COUNT_FOR_STORM_SPELLS)) {
                         // skip evaluating Storm unless we reached the minimum Storm count
+                        stormWaiting.add(sa);
                         continue;
                     }
                 }
@@ -1666,6 +2046,14 @@ public class AiController {
 
                 // reset LastStateBattlefield
                 sa.clearLastState();
+                if (AI_TRACE != null && player.getName().contains(AI_TRACE)
+                        && (sa.getHostCard().isInZone(ZoneType.Hand) || (sa.isActivatedAbility() && !sa.isManaAbility()) || ManaFilterAi.isFilter(sa))) {
+                    // paie=false : aucune source ne donne les couleurs du coût (le relevé confondait ce cas avec un refus de l'IA)
+                    System.out.printf("AI_TRACE %s T%d %s : %s%s -> %s cmc=%d soi=%b paie=%b%n", player.getName(), game.getPhaseHandler().getTurn(),
+                            game.getPhaseHandler().getPhase(), sa.getHostCard().getName(), sa.isSpell() ? "" : " (capacité)", opinion,
+                            sa.getHostCard().getCMC(), game.getPhaseHandler().isPlayerTurn(player),
+                            !sa.getPayCosts().hasManaCost() || ComputerUtilMana.hasEnoughManaSourcesToCast(sa, player));
+                }
                 // PhaseHandler ph = game.getPhaseHandler();
                 // System.out.printf("Ai thinks '%s' of %s -> %s @ %s %s >>> \n", opinion, sa.getHostCard(), sa, Lang.getInstance().getPossesive(ph.getPlayerTurn().getName()), ph.getPhase());
 
@@ -1675,6 +2063,23 @@ public class AiController {
 
                 // TODO could continue to try find another with higher rating (weighted by priority ordering)
                 return sa;
+            }
+
+            // magic-tools: rule 108, nothing else was played: the Storm spell goes alone rather than never
+            for (final SpellAbility sa : stormWaiting) {
+                if (Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                sa.setActivatingPlayer(player);
+                if (sa.getRootAbility().isSpell()) {
+                    sa.setLastStateBattlefield(game.getLastStateBattlefield());
+                    sa.setLastStateGraveyard(game.getLastStateGraveyard());
+                }
+                AiPlayDecision opinion = canPlayAndPayFor(sa);
+                sa.clearLastState();
+                if (opinion == AiPlayDecision.WillPlay) {
+                    return sa;
+                }
             }
 
             return null;
@@ -1804,7 +2209,12 @@ public class AiController {
             return Expressions.compare(left, comparator, compareTo);
         } else if (effect.isKeyword(Keyword.DREDGE)) {
             return player.getCardsIn(ZoneType.Library).size() > 8 || player.isCardInPlay("Laboratory Maniac");
-        } else return sa != null && doTrigger(sa, false);
+        }
+        // magic-tools: rule 123, optional "instead dig until a card of the chosen kind → hand" draw replacement
+        if (forge.ai.ability.DrawDig123.accept(effect, sa, player) != null) {
+            return true;
+        }
+        return sa != null && doTrigger(sa, false);
     }
 
     public List<SpellAbility> chooseSaToActivateFromOpeningHand(List<SpellAbility> usableFromOpeningHand) {
@@ -1849,6 +2259,11 @@ public class AiController {
 
     public int chooseNumber(SpellAbility sa, String title, int min, int max) {
         final Card source = sa.getHostCard();
+        // magic-tools: rule 181, the energy paid for a sweep (Wrath of the Skies)
+        final int sweep = ThresholdSweepAi.chooseNumber(player, sa, min, max);
+        if (sweep >= 0) {
+            return sweep;
+        }
         final String logic = sa.getParamOrDefault("AILogic", "Max");
         if ("GainLife".equals(logic)) {
             if (player.getLife() < 5 || player.getCardsIn(ZoneType.Hand).size() >= player.getMaxHandSize()) {
@@ -2345,6 +2760,11 @@ public class AiController {
                 return doubleLife.get(0);
             }
         } else if (mode.equals(ReplacementType.DamageDone)) {
+            // magic-tools: rule 261, double the damage before Vigor / Purity turn it into counters or life
+            final ReplacementEffect increase = PreventionPayoff261.firstIncrease(player, list);
+            if (increase != null) {
+                return increase;
+            }
             List<ReplacementEffect> prevention = filterList(list, CardTraitPredicates.hasParam("Prevent"));
 
             // TODO when Protection is done as ReplacementEffect do them

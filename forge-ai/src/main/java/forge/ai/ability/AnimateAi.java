@@ -86,6 +86,14 @@ public class AnimateAi extends SpellAbilityAi {
     protected boolean checkPhaseRestrictions(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
         final Card source = sa.getHostCard();
         final Game game = ai.getGame();
+        // magic-tools: Undying Malice answers removal or a lost combat, whenever it happens (UndyingSaveAi)
+        if (UndyingSaveAi.isMalice(sa)) {
+            return true;
+        }
+        // magic-tools: Cerulean Wisps untaps a Gelectrode whenever one is tapped (WispsUntapAi)
+        if (WispsUntapAi.isWisps(sa)) {
+            return true;
+        }
         // Interrupt sacrifice effect
         if (!game.getStack().isEmpty()) {
             SpellAbility topStack = game.getStack().peekAbility();
@@ -147,6 +155,17 @@ public class AnimateAi extends SpellAbilityAi {
         final Game game = aiPlayer.getGame();
         final PhaseHandler ph = game.getPhaseHandler();
 
+        if (WispsUntapAi.isWisps(sa)) {
+            return WispsUntapAi.chooseTarget(aiPlayer, sa)
+                    ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+        if (UndyingSaveAi.isMalice(sa)) {
+            return UndyingSaveAi.chooseMaliceTarget(aiPlayer, sa)
+                    ? new AiAbilityDecision(100, AiPlayDecision.ResponseToStackResolve)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         if (!game.getStack().isEmpty() && game.getStack().peekAbility().getApi() == ApiType.Sacrifice) {
             // Should I animate a card before i have to sacrifice something better?
             if (!isAnimatedThisTurn(aiPlayer, source)) {
@@ -204,9 +223,15 @@ public class AnimateAi extends SpellAbilityAi {
                     // Do not try to crew a vehicle which is already a creature
                     return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                 }
+                // magic-tools: keep the mana of a permanent waiting for main 2 (ManlandMain2Ai)
+                if (ManlandMain2Ai.keepsManaForHand(aiPlayer, sa, c)) {
+                    return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+                }
                 Card animatedCopy = becomeAnimated(c, sa);
+                // magic-tools: rule 244, the copy does not carry "can't be blocked this turn" (ManlandEvasiveAi)
                 if (ph.isPlayerTurn(aiPlayer)
-                        && !ComputerUtilCard.doesSpecifiedCreatureAttackAI(aiPlayer, animatedCopy)) {
+                        && !ComputerUtilCard.doesSpecifiedCreatureAttackAI(aiPlayer, animatedCopy)
+                        && !ManlandEvasiveAi.attacksUnblocked(aiPlayer, sa, animatedCopy)) {
                     return new AiAbilityDecision(0, AiPlayDecision.DoesntImpactCombat);
                 }
                 if (ph.getPlayerTurn().isOpponentOf(aiPlayer)

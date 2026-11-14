@@ -80,7 +80,30 @@ public class ChangeZoneAi extends SpellAbilityAi {
             return false;
         }
 
+        // magic-tools: rule 125, a creature that sacrifices itself to return a creature card from the graveyard
+        // to the battlefield (Doomed Necromancer) pays that cost when the best target is clearly worth more than it
+        if (sacSelfForBetterReanimation(payer, sa, cost, source)) {
+            return ComputerUtilCost.checkLifeCost(payer, cost, source, 4, sa)
+                    && ComputerUtilCost.checkDiscardCost(payer, cost, source, sa)
+                    && ComputerUtilCost.checkRemoveCounterCost(cost, source, sa);
+        }
+
         return super.willPayCosts(payer, sa, cost, source);
+    }
+
+    static boolean sacSelfForBetterReanimation(Player ai, SpellAbility sa, Cost cost, Card source) {
+        if (!sa.usesTargeting() || source == null || !source.isCreature() || !source.isInPlay()
+                || !ComputerUtilCost.isSacrificeSelfCost(cost)
+                || !"Graveyard".equals(sa.getParam("Origin")) || !"Battlefield".equals(sa.getParam("Destination"))) {
+            return false;
+        }
+        CardCollection targets = CardLists.filter(CardLists.getTargetableCards(ai.getCardsIn(ZoneType.Graveyard), sa),
+                c -> c.isCreature() && !c.equals(source) && (c.ignoreLegendRule() || !ai.isCardInPlay(c.getName())));
+        Card best = ComputerUtilCard.getBestCreatureAI(targets);
+        if (best == null) {
+            return false;
+        }
+        return ComputerUtilCard.evaluateCreature(best) >= ComputerUtilCard.evaluateCreature(source) + 80;
     }
 
     @Override
@@ -141,6 +164,11 @@ public class ChangeZoneAi extends SpellAbilityAi {
     protected AiAbilityDecision checkApiLogic(Player aiPlayer, SpellAbility sa) {
         multipleCardsToChoose.clear();
         String aiLogic = sa.getParam("AILogic");
+        // magic-tools, règle 16 : sacrifice + recherche « valeur de mana du sacrifié + N » sans AILogic = un Pod (Neoform)
+        if (aiLogic == null && SacUpgradeAi.prepare(sa)) {
+            sa.getHostCard().removeSVar("AIPreferenceOverride");
+            return doSacAndUpgradeLogic(aiPlayer, sa);
+        }
         if (aiLogic != null) {
             if (aiLogic.equals("Always")) {
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
@@ -169,6 +197,21 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 } else {
                     return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                 }
+            } else if (aiLogic.equals("Soulstoke")) {
+                // magic-tools: Incandescent Soulstoke only for an elemental we cannot cast and that does something (Cendreline)
+                return SoulstokeAi.shouldActivate(aiPlayer, sa)
+                        ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                        : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            } else if (aiLogic.equals("Akul")) {
+                // magic-tools: Akul the Unrepentant trades three cheap creatures for a big one we cannot cast (Nothing Gulch)
+                return AkulAi.shouldActivate(aiPlayer, sa)
+                        ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                        : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            } else if (aiLogic.equals("RunAwayTogether")) {
+                // magic-tools: saves our creature or replays an ETB, with an opposing creature (grenouille, tester)
+                return FrogBounceAi.chooseRunAwayTargets(aiPlayer, sa)
+                        ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                        : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             } else if (aiLogic.equals("ReturnCastable")) {
                 if (!sa.getHostCard().getExiledCards().isEmpty()
                         && ComputerUtilMana.canPayManaCost(sa.getHostCard().getExiledCards().getFirst().getFirstSpellAbility(), aiPlayer, 0, false)) {
@@ -176,6 +219,18 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 }
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
+        }
+        // magic-tools: rule 277, Jeune Enture returns our own tapped land when it can be played again this turn
+        if (forge.ai.LandReplayAi.bounceToReplay(aiPlayer, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 278, Ent de Fangorn / Skyshroud Ranger put the lands of the hand in on our main phase
+        if (forge.ai.LandReplayAi.putNow(aiPlayer, sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+        // magic-tools: rule 240, Time Wipe saves a creature of ours before the sweep: the sweep decides
+        if (forge.ai.MassBehindHead240.applies(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
         if (sa.isHidden()) {
             return hiddenOriginCanPlayAI(aiPlayer, sa);
@@ -244,6 +299,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
+        // magic-tools: Goblin Recruiter always stacks its goblins (RecruiterAi caps how many)
+        if (RecruiterAi.isRecruiter(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         if (sa.isHidden()) {
             return hiddenTriggerAI(aiPlayer, sa, mandatory);
         }
@@ -283,6 +342,11 @@ public class ChangeZoneAi extends SpellAbilityAi {
             origin = ZoneType.listValueOf(sa.getParam("Origin"));
         }
         final String destination = sa.getParam("Destination");
+
+        // magic-tools: rule 139, Entomb waits for the ritual that also pays the reanimation
+        if (Entomb139.waitForRitual(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.AnotherTime);
+        }
 
         if (sa.isNinjutsu()) {
             if (!source.ignoreLegendRule() && ai.isCardInPlay(source.getName())) {
@@ -405,8 +469,18 @@ public class ChangeZoneAi extends SpellAbilityAi {
             }
         }
 
+        // magic-tools: rule 289, a symmetric reanimation (Exhume) that gives the opponent a better creature waits
+        if (!activateForCost && SymmetricReanimateAi.badTrade(ai, sa, origin, destination, pDefined)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         if (ComputerUtil.playImmediately(ai, sa)) {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
+
+        // magic-tools: rule 107, an instant tutor to the top of the library waits for the opponent's end step
+        if (TutorTopAi.waitsForOpponentEnd(ai, sa, origin, destination)) {
+            return new AiAbilityDecision(0, AiPlayDecision.WaitForEndOfTurn);
         }
 
         // don't use fetching to top of library/graveyard before main2
@@ -578,9 +652,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
         // Which basic land is least available from hand and play, that I still
         // have in my deck
         int minSize = Integer.MAX_VALUE;
-        String minType = null;
+        // magic-tools: rule 36, the color the hand asks for first
+        String minType = forge.ai.FetchColorAi.neededBasicType(ai, basics);
 
-        for (String b : basics) {
+        for (String b : minType != null ? new ArrayList<String>() : basics) {
             // average between well rounded mana base and shards that were missing
             int num = CardLists.getType(combined, b).size();
             if (!basicTypes.isEmpty()) {
@@ -900,6 +975,15 @@ public class ChangeZoneAi extends SpellAbilityAi {
         CardCollection list = CardLists.getTargetableCards(game.getCardsIn(origin), sa);
 
         list = ComputerUtil.filterAITgts(sa, ai, list, true);
+        // magic-tools: rule 225, a host that attaches itself to what it returns (Necromancy) falls off a creature protected from it
+        if (destination.equals(ZoneType.Battlefield) && origin.contains(ZoneType.Graveyard)) {
+            list = CardLists.filter(list, c -> !forge.ai.ReanimatorAi.dropsOwnAttachment(c, sa));
+        }
+        // magic-tools: rule 299, a reanimation that costs life equal to the mana value keeps the AI out of reach
+        if (!mandatory && destination.equals(ZoneType.Battlefield) && origin.contains(ZoneType.Graveyard)
+                && forge.ai.NewAi.on(ai, 299)) {
+            list = CardLists.filter(list, c -> !forge.ai.ReanimatorAi.lifeLossTooDangerous(ai, sa, c));
+        }
 
         if (source.isInZone(ZoneType.Hand)) {
             list = CardLists.filter(list, CardPredicates.nameNotEquals(source.getName())); // Don't get the same card back.
@@ -1023,9 +1107,20 @@ public class ChangeZoneAi extends SpellAbilityAi {
 
                     return true;
                 }
+                // magic-tools rule 284: bounce our own arrival creature to cast it again (Mal de la Comté, D165)
+                if (!blink && destination.equals(ZoneType.Hand)) {
+                    Card rebuy = forge.ai.RebuyEtbAi.choose(ai, sa, list);
+                    if (rebuy != null) {
+                        sa.getTargets().add(rebuy);
+                        return true;
+                    }
+                }
                 // blink logic: get my own permanents back or blink permanents with ETB effects
                 if (blink) {
-                    CardCollection blinkTargets = CardLists.filter(list, c -> !c.isToken() && c.getOwner().equals(ai) && (c.getController().isOpponentOf(ai) || c.hasETBTrigger(false)));
+                    // magic-tools, general rule 5: our creature only if its ETB is worth more than what it loses (BlinkAi)
+                    CardCollection blinkTargets = CardLists.filter(list, c -> !c.isToken() && c.getOwner().equals(ai) && (c.getController().isOpponentOf(ai)
+                            || (forge.ai.NewAi.on(ai, 313) ? BlinkAi.gain(ai, c) > 0
+                                    : c.hasETBTrigger(false) && BlinkAi.etbValue(ai, c) - BlinkAi.leaveCost(ai, c) > 0)));
                     if (!blinkTargets.isEmpty()) {
                         CardCollection opponentBlinkTargets = CardLists.filterControlledBy(blinkTargets, ai.getOpponents());
                         // prefer post-combat unless targeting opponent's stuff or part of another ability
@@ -1038,7 +1133,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
                                     opponentBlinkTargets.remove(choice);
                                 }
                                 else {
-                                    choice = ComputerUtilCard.getBestAI(blinkTargets);
+                                    choice = BlinkAi.choose(ai, blinkTargets);
+                                    if (choice == null) {
+                                        break;
+                                    }
                                 }
                                 sa.getTargets().add(choice);
                                 blinkTargets.remove(choice);
@@ -1120,6 +1218,8 @@ public class ChangeZoneAi extends SpellAbilityAi {
                 });
                 if (origin.contains(ZoneType.Battlefield)) {
                     list = ComputerUtil.filterCreaturesThatWillDieThisTurn(ai, list);
+                    // magic-tools: rule 194, a removal spell does not go on Chromatic Star or a Treasure
+                    list = MinorPermanentAi.withoutMinor(sa, list);
                 }
             }
 
@@ -1176,6 +1276,11 @@ public class ChangeZoneAi extends SpellAbilityAi {
                             ? ComputerUtilCard.getBestRemovalTargetAI(ai, list)
                             : ComputerUtilCard.getMostExpensivePermanentAI(list);
                     if (choice.isCreature() && origin.contains(ZoneType.Graveyard)) {
+                        // magic-tools: rule 37, Iona against a deck leaning on one colour, otherwise the best fatty
+                        Card fatty = ReanimatorAi.chooseFatty(ai, CardLists.filter(list, CardPredicates.CREATURES));
+                        if (fatty != null) {
+                            choice = fatty;
+                        }
                         // Karmic Guide can chain another creature
                         for (Card c : list) {
                             if ("Karmic Guide".equals(c.getName())) {
@@ -1395,6 +1500,14 @@ public class ChangeZoneAi extends SpellAbilityAi {
             if (!list.isEmpty()) {
                 if (tgt.getZone().contains(ZoneType.Battlefield)) {
                     choice = ComputerUtilCard.getBestRemovalTargetAI(ai, list);
+                    // magic-tools: rule 312, a mandatory removal with no good target still takes an opponent's card,
+                    // even one already neutralised by its own aura, and only then the least valuable of its own
+                    if (!destination.equals(ZoneType.Battlefield) && !sa.hasParam("AITgtOwnCards")
+                            && forge.ai.NewAi.on(ai, 312)) {
+                        CardCollection opp = CardLists.filterControlledBy(list, ai.getOpponents());
+                        choice = !opp.isEmpty() ? ComputerUtilCard.getBestRemovalTargetAI(ai, opp)
+                                : ComputerUtilCard.getWorstAI(list);
+                    }
                 } else if (destination.equals(ZoneType.Battlefield)) {
                     choice = ComputerUtilCard.getMostExpensivePermanentAI(list);
                     if (choice.isCreature()) {
@@ -1508,7 +1621,53 @@ public class ChangeZoneAi extends SpellAbilityAi {
         if (fetchList.isEmpty()) {
             return null;
         }
-        List<String> keyCards = player.getRegisteredPlayer().getDeck().getKeyCards();
+        // magic-tools: Isochron Scepter imprints its best instant, not the worst one
+        if (decider != null && player == decider && ZoneType.Exile.equals(destination) && origin.contains(ZoneType.Hand)
+                && ScepterAi.isScepterImprint(sa)) {
+            return ScepterAi.chooseImprint(fetchList);
+        }
+        // magic-tools: Mistbreath Elder bounces a cheap ETB creature to replay it (grenouille, tester)
+        if (decider != null && player == decider && FrogBounceAi.isElder(sa)) {
+            return FrogBounceAi.chooseElderBounce(decider, fetchList);
+        }
+        // magic-tools: Incandescent Soulstoke puts in the elemental worth losing at the end step (Cendreline)
+        if (decider != null && player == decider && SoulstokeAi.isSoulstoke(sa)) {
+            return SoulstokeAi.choose(decider, sa, fetchList);
+        }
+        // magic-tools: Akul the Unrepentant puts in the best creature we cannot cast (Nothing Gulch)
+        if (decider != null && player == decider && AkulAi.isAkul(sa)) {
+            return AkulAi.choose(decider, sa, fetchList);
+        }
+        // magic-tools: Goblin Recruiter stacks a few castable goblins, not the whole library (Moria)
+        if (decider != null && player == decider && RecruiterAi.isRecruiter(sa)) {
+            return RecruiterAi.choose(decider, sa, fetchList);
+        }
+        Card reanimatorChoice = ReanimatorAi.choose(destination, sa, fetchList, decider);
+        if (reanimatorChoice != null) {
+            return reanimatorChoice;
+        }
+        // magic-tools: the piece that assembles the persist loop (Murderous Redcap next to Melira and Viscera Seer)
+        if (decider != null && (destination == ZoneType.Battlefield || destination == ZoneType.Hand || destination == ZoneType.Library)) {
+            Card podChoice = PodComboAi.chooseFetch(decider, fetchList);
+            if (podChoice != null) {
+                return podChoice;
+            }
+        }
+        // magic-tools: rule 279, our own land back to the hand: from the graveyard first, then a tapped one
+        if (decider != null && player == decider && destination == ZoneType.Hand) {
+            Card land = forge.ai.LandReplayAi.chooseReturnedLand(decider, sa, fetchList);
+            if (land != null) {
+                return land;
+            }
+        }
+        // magic-tools: rule 273, a tutor to hand / library top completes the persist loop from hand + battlefield
+        if (decider != null && player == decider && (destination == ZoneType.Hand || destination == ZoneType.Library)) {
+            Card piece = PodComboAi.chooseMissingPiece(decider, fetchList);
+            if (piece != null) {
+                return piece;
+            }
+        }
+        List<String> keyCards = DeckPlanAi.keyCards(player); // magic-tools: rule 263, through the deck plan switches
         String position = sa.getParamOrDefault("LibraryPosition", null);
         // Focus on the keycards I don't already have access to
         if (destination.equals(ZoneType.Battlefield) || destination.equals(ZoneType.Hand) ||
@@ -1528,6 +1687,17 @@ public class ChangeZoneAi extends SpellAbilityAi {
             keycardFound = withKeyCard.getFirst();
             break;
         }
+        // magic-tools: rule 288 (11/11, Profanation, under-rated by Forge): a search that puts a card from my library
+        // into my graveyard (Entomb, Buried Alive) is not a tutor: the key cards (Animate Dead, a 2nd Entomb) are wanted
+        // in hand, not buried. The best creature goes instead, the one to bring back.
+        if (decider != null && player == decider && ZoneType.Graveyard.equals(destination)
+                && origin.contains(ZoneType.Library) && NewAi.on(decider, 288)) {
+            keycardFound = null;
+            CardCollection creatures = CardLists.filter(fetchList, CardPredicates.CREATURES);
+            if (!creatures.isEmpty()) {
+                return ComputerUtilCard.getBestCreatureAI(creatures);
+            }
+        }
 
         if (sa.hasParam("AILogic")) {
             String logic = sa.getParamOrDefault("AILogic", "");
@@ -1537,6 +1707,8 @@ public class ChangeZoneAi extends SpellAbilityAi {
                     // For cards that should never be bounced back to hand with their own [e.g. triggered] abilities, such as guild lands.
                     fetchList.remove(source);
                 }
+                // magic-tools: rule 72, a bounce land returns a land whose mana is already spent (KarooAi)
+                fetchList = KarooAi.preferTapped(fetchList);
             } else if ("WorstCard".equals(logic)) {
                 return ComputerUtilCard.getWorstAI(fetchList);
             } else if ("BestCard".equals(logic)) {
@@ -1604,6 +1776,13 @@ public class ChangeZoneAi extends SpellAbilityAi {
                     }
                 }
 
+                // magic-tools: rule 165, "when this enters, return an Orc you control": another Orc goes back, not the
+                // card that was just cast (Lieutenant Orque bounced itself next to a Brassclaw Orcs)
+                if (origin.contains(ZoneType.Battlefield) && SelfBounceEtbAi.isOwnArrivalTrigger(sa)
+                        && fetchList.size() > 1 && fetchList.contains(sa.getHostCard())) {
+                    fetchList = new CardCollection(fetchList);
+                    fetchList.remove(sa.getHostCard());
+                }
                 c = ComputerUtilCard.getWorstAI(fetchList);
                 if (ComputerUtilAbility.getAbilitySourceName(sa).equals("Temur Sabertooth")) {
                     Card tobounce = canBouncePermanent(player, sa, fetchList);
@@ -1627,7 +1806,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
             } else {
                 if (keycardFound != null) return keycardFound;
 
-                c = ComputerUtilCard.getBestAI(fetchList);
+                // magic-tools: rule 199, a search among lands weighs what each land does for this game
+                c = origin.contains(ZoneType.Library) && activator.equals(decider) && fetchList.allMatch(CardPredicates.LANDS)
+                        ? forge.ai.LandSearchAi.choose(decider, fetchList, sa.hasParam("Tapped"))
+                        : ComputerUtilCard.getBestAI(fetchList);
             }
         } else {
             // Don't fetch another tutor with the same name
@@ -1642,14 +1824,20 @@ public class ChangeZoneAi extends SpellAbilityAi {
             // Does AI need a land?
             // The logic here seems wrong if the decider isn't the same as the player
             CardCollectionView hand = decider.getCardsIn(ZoneType.Hand);
-            if (!hand.anyMatch(CardPredicates.LANDS) && CardLists.count(decider.getCardsIn(ZoneType.Battlefield), CardPredicates.LANDS) < 4 &&
+            // magic-tools: rule 80, only when a land can be fetched; with an elf-only list (Elvish Harbinger) the
+            // land search found nothing and the choice fell on a random elf instead of Beast Whisperer
+            if (fetchList.anyMatch(CardPredicates.LANDS) &&
+                    !hand.anyMatch(CardPredicates.LANDS) && CardLists.count(decider.getCardsIn(ZoneType.Battlefield), CardPredicates.LANDS) < 4 &&
                     !hand.anyMatch(crd -> ComputerUtilMana.hasEnoughManaSourcesToCast(crd.getFirstSpellAbility(), decider))) {
                 c = basicManaFixing(decider, fetchList);
             }
             if (c == null) {
                 if (fetchList.allMatch(CardPredicates.LANDS)) {
                     // we're only choosing from lands, so get the best land
-                    c = ComputerUtilCard.getBestLandAI(fetchList);
+                    // magic-tools: rule 199, the one that does most for this game
+                    c = origin.contains(ZoneType.Library) && activator.equals(decider)
+                            ? forge.ai.LandSearchAi.choose(decider, fetchList, false)
+                            : ComputerUtilCard.getBestLandAI(fetchList);
                 } else {
                     fetchList = CardLists.getNotType(fetchList, "Land");
                     // Prefer to pull a creature, generally more useful for AI.
@@ -1727,6 +1915,10 @@ public class ChangeZoneAi extends SpellAbilityAi {
      */
     @Override
     public boolean confirmAction(Player player, SpellAbility sa, PlayerActionConfirmMode mode, String message, Map<String, Object> params) {
+        // magic-tools, règle 17 : an optional repeat that digs our library stops before emptying it (Primal Surge)
+        if (DeckOutAi.optionalRepeatEmptiesLibrary(player, sa)) {
+            return false;
+        }
         // AI was never asked
         return true;
     }
@@ -1793,7 +1985,12 @@ public class ChangeZoneAi extends SpellAbilityAi {
         Card source = sa.getHostCard();
         PhaseHandler ph = ai.getGame().getPhaseHandler();
         String logic = sa.getParam("AILogic");
-        boolean sacWorst = logic.contains("SacWorst");
+        boolean sacWorst = logic != null && logic.contains("SacWorst");
+
+        // magic-tools: fetching the missing piece of the persist loop is worth it in either main phase
+        if (PodComboAi.plan(ai, sa) != null) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
 
         if (!ph.is(PhaseType.MAIN2)) {
             // Should be given a chance to cast other spells as well as to use a previously upgraded creature
@@ -1806,6 +2003,12 @@ public class ChangeZoneAi extends SpellAbilityAi {
 
         CardCollection listToSac = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield), definedSac, ai, source, sa);
         listToSac.sort(!sacWorst ? CardLists.CmcComparatorInv : CardLists.CmcComparator);
+
+        // magic-tools, règle 204 : le seul sacrificateur ne paie pas la montée s'il y a une pièce de boucle
+        // magic-tools, règle 296 : ni le seul bouclier de persistance (Melira)
+        listToSac = CardLists.filter(listToSac, c -> !SacUpgradeAi.keepsLoopPiece(ai, c));
+        // magic-tools, règle 210 : ni la seule source d'une couleur dont un sort de la main a besoin
+        listToSac = CardLists.filter(listToSac, c -> !SoleColorAi.keepsColor(ai, c));
 
         for (Card sacCandidate : listToSac) {
             int sacCMC = sacCandidate.getCMC();
@@ -2096,9 +2299,13 @@ public class ChangeZoneAi extends SpellAbilityAi {
         CardCollection unprefChoices = CardLists.filter(choices, c -> !c.isToken() && c.getOwner().equals(ai));
         // TODO check for threatened cards
         CardCollection prefChoices = CardLists.filter(unprefChoices, c -> c.hasETBTrigger(false));
-        if (!prefChoices.isEmpty()) {
-            return ComputerUtilCard.getBestAI(prefChoices);
+        // magic-tools, general rule 5: the ETB worth the most, not the best creature with any ETB (BlinkAi)
+        Card blinkChoice = BlinkAi.choose(ai, prefChoices);
+        if (blinkChoice != null) {
+            return blinkChoice;
         }
+        // never the one whose ETB hurts (Phyrexian Dreadnought)
+        unprefChoices = CardLists.filter(unprefChoices, c -> !c.hasETBTrigger(false) || BlinkAi.etbValue(ai, c) - BlinkAi.leaveCost(ai, c) >= 0);
         if (!unprefChoices.isEmpty() && sa.getSubAbility() != null) {
             // some extra benefit like First Responder
             return ComputerUtilCard.getWorstAI(unprefChoices);

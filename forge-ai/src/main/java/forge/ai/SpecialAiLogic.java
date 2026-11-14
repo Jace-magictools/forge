@@ -152,6 +152,11 @@ public class SpecialAiLogic {
             return false;
         }
 
+        // magic-tools: a creature stolen until end of turn (Claim the Firstborn) is free fodder once combat is over
+        if (ThreatenSacAi.hasStolenFodder(ai, source)) {
+            return true;
+        }
+
         if (combat == null) {
             return false;
         }

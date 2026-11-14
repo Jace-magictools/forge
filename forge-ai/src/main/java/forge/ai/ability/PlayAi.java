@@ -34,7 +34,9 @@ public class PlayAi extends SpellAbilityAi {
         final Card source = sa.getHostCard();
         // don't use this as a response (ReplaySpell logic is an exception, might be called from a subability
         // while the trigger is on stack)
-        if (!game.getStack().isEmpty() && !"ReplaySpell".equals(logic)) {
+        // magic-tools: a counterspell under Isochron Scepter is played in response (ScepterAi)
+        final boolean scepter = ScepterAi.isScepter(source);
+        if (!game.getStack().isEmpty() && !"ReplaySpell".equals(logic) && !ScepterAi.imprintsCounter(source)) {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
@@ -60,6 +62,10 @@ public class PlayAi extends SpellAbilityAi {
             return new AiAbilityDecision(0, AiPlayDecision.MissingNeededCards);
         }
 
+        // magic-tools: never tap the Scepter for nothing (the copy would not be cast)
+        if (scepter && chooseSingleCard(ai, sa, cards, true, null, null) == null) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
         if ("ReplaySpell".equals(logic)) {
             if (ComputerUtil.targetPlayableSpellCard(ai, cards, sa, sa.hasParam("WithoutManaCost"), false)) {
                 return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
@@ -163,7 +169,13 @@ public class PlayAi extends SpellAbilityAi {
         } else {
             validSA = null;
         }
-        List<Card> tgtCards = CardLists.filter(options, c -> {
+        // magic-tools: rule 124, the Scepter's copy is free and comes back every turn
+        final boolean freeCopy = ScepterAi.isScepter(sa.getHostCard()) && sa.hasParam("WithoutManaCost");
+        final boolean wasFree = ScepterAi.isFreeCopy();
+        ScepterAi.setFreeCopy(freeCopy || wasFree);
+        List<Card> tgtCards;
+        try {
+        tgtCards = CardLists.filter(options, c -> {
             // TODO needs to be aligned for MDFC along with getAbilityToPlay so the knowledge
             // of which spell was the reason for the choice can be used there
             for (SpellAbility s : AbilityUtils.getSpellsFromPlayEffect(c, ai, state, false, validSA)) {
@@ -191,7 +203,16 @@ public class PlayAi extends SpellAbilityAi {
                     if ("ManaCost".equals(sa.getParam("PlayCost"))) {
                         abCost = new Cost(c.getManaCost(), false);
                     } else {
-                        abCost = new Cost(sa.getParam("PlayCost"), false);
+                        // magic-tools: rule 190, PlayEffect swaps ConvertedManaCost for the card's value: read raw
+                        // it was an unknown SVar (0), so any card looked payable (Anrakyr picking a 7-drop it refuses to pay at 7 life, instead of the 2-drop)
+                        String playCost = sa.getParam("PlayCost");
+                        if (playCost.contains("ConvertedManaCost")) {
+                            playCost = playCost.replace("ConvertedManaCost", Integer.toString(c.getCMC()));
+                        }
+                        abCost = new Cost(playCost, false);
+                        if (!ComputerUtilCost.checkLifeCost(ai, abCost, c, 4, spell)) {
+                            continue;
+                        }
                     }
 
                     spell = (Spell) spell.copyWithManaCostReplaced(spell.getActivatingPlayer(), abCost);
@@ -209,6 +230,9 @@ public class PlayAi extends SpellAbilityAi {
             }
             return false;
         });
+        } finally {
+            ScepterAi.setFreeCopy(wasFree);
+        }
 
         if (sa.hasParam("CastTransformed")) {
             options.forEach(c -> c.changeToState(CardStateName.Original));

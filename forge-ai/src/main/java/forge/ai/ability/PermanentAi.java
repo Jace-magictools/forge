@@ -35,7 +35,10 @@ public class PermanentAi extends SpellAbilityAi {
         }
 
         // Wait for Main2 if possible
-        return !ph.is(PhaseType.MAIN1) || !ph.isPlayerTurn(ai) || sa.hasParam("WithoutManaCost") || ComputerUtil.castPermanentInMain1(ai, sa);
+        // magic-tools: rule 249, a sweeper permanent comes down in main 1 under pressure
+        // magic-tools: rule 286, a permanent cast by an effect (madness) has no main 2
+        return !ph.is(PhaseType.MAIN1) || !ph.isPlayerTurn(ai) || sa.hasParam("WithoutManaCost") || isNowOrNever(ai) || ComputerUtil.castPermanentInMain1(ai, sa)
+                || forge.ai.SweeperUnderPressure249.castInMain1(ai, sa);
     }
 
     /**
@@ -45,6 +48,26 @@ public class PermanentAi extends SpellAbilityAi {
     @Override
     protected AiAbilityDecision checkApiLogic(final Player ai, final SpellAbility sa) {
         final Card source = sa.getHostCard();
+
+        // magic-tools: rule 77, don't cast a permanent our own Culling Scales would destroy at our next upkeep
+        if (sa.isSpell() && forge.ai.CullingScalesAi.wouldBeCulled(ai, source)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
+        // magic-tools: rule 247, no creature our own arrival triggers kill; their host waits for the creature first
+        if (forge.ai.HarmfulArrival247.refuse(ai, sa) || forge.ai.HarmfulArrival247.holdForVictim(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
+        // magic-tools: rule 254, no x/1 without value of its own cast into an opposing pinger ({T}: N damage)
+        if (forge.ai.PingerVictim254.refuse(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
+        // magic-tools: rule 103, the cards our payoff in hand would count ("whenever an artifact enters...") wait for it
+        if (forge.ai.ArrivalPayoffAi.holdBack(ai, sa, ai.getGame().getPhaseHandler())) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
 
         // check on legendary
         if (!source.ignoreLegendRule() && ai.isCardInPlay(source.getName())) {
@@ -339,9 +362,23 @@ public class PermanentAi extends SpellAbilityAi {
         if (cost != null && !willPayCosts(ai, sa, cost, sa.getHostCard())) {
             return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
-        if (!checkPhaseRestrictions(ai, sa, ai.getGame().getPhaseHandler())) {
-            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        // magic-tools: rule 286, a permanent cast by an effect (madness, cascade) is now or never: no waiting for a better time
+        final boolean wasNow = NOW_OR_NEVER.get();
+        NOW_OR_NEVER.set(true);
+        try {
+            if (!checkPhaseRestrictions(ai, sa, ai.getGame().getPhaseHandler())) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+        } finally {
+            NOW_OR_NEVER.set(wasNow);
         }
         return checkApiLogic(ai, sa);
      }
+
+    private static final ThreadLocal<Boolean> NOW_OR_NEVER = ThreadLocal.withInitial(() -> false);
+
+    /** magic-tools: rule 286, true while judging a permanent cast by an effect (madness, cascade): now or never. */
+    public static boolean isNowOrNever(Player ai) {
+        return NOW_OR_NEVER.get() && forge.ai.NewAi.on(ai, 286);
+    }
 }

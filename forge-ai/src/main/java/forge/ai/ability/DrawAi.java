@@ -46,13 +46,21 @@ public class DrawAi extends SpellAbilityAi {
         PhaseHandler ph = ai.getGame().getPhaseHandler();
         boolean aboutToBeMyTurn = ph.getNextTurn().equals(ai) && ph.is(PhaseType.END_OF_TURN);
 
+        // magic-tools: Magus of the Bazaar only when the discards are worth something (Oasis)
+        if (BazaarAi.isBazaar(sa)) {
+            return BazaarAi.shouldActivate(ai, sa) ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         if (!targetAI(ai, sa, false)) {
             return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
         }
 
         if (sa.usesTargeting()) {
             final Player player = sa.getTargets().getFirstTargetedPlayer();
-            if (player != null && player.isOpponentOf(ai)) {
+            // magic-tools: rule 129, a punisher draw (Risk Factor: "Defined$ You", the targeted opponent only chooses
+            // to take damage or let us draw) is not a gift to the opponent: targetAI already picked them on purpose
+            if (player != null && player.isOpponentOf(ai) && !isPunisherDraw(sa)) {
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
         }
@@ -136,7 +144,7 @@ public class DrawAi extends SpellAbilityAi {
                     if (null == decision)
                         return false;
                     for (Card discard : decision.cards) {
-                        if (!ComputerUtil.isWorseThanDraw(payer, discard)) {
+                        if (!ComputerUtil.isWorseThanDraw(payer, discard) && !SpareLandAi.isSpare(payer, discard, source)) {
                             return false;
                         }
                     }
@@ -192,7 +200,9 @@ public class DrawAi extends SpellAbilityAi {
             // attempt to save the AI from dying
             return true;
         } else if (logic.equals("RespondToOwnActivation")) {
-            return !ai.getGame().getStack().isEmpty() && ai.getGame().getStack().peekAbility().getHostCard().equals(sa.getHostCard());
+            // magic-tools: rule 167, also when the stack threatens the host (Sensei's Divining Top under Culling Scales)
+            return !ai.getGame().getStack().isEmpty() && (ai.getGame().getStack().peekAbility().getHostCard().equals(sa.getHostCard())
+                    || forge.ai.OwnThreatResponseAi.isThreatened(ai, sa));
         } else if ((!ph.getNextTurn().equals(ai) || ph.getPhase().isBefore(PhaseType.END_OF_TURN))
                 && !sa.hasParam("PlayerTurn") && !isSorcerySpeed(sa, ai)
                 && ai.getCardsIn(ZoneType.Hand).size() > 1 && !ComputerUtil.activateForCost(sa, ai)
@@ -248,6 +258,11 @@ public class DrawAi extends SpellAbilityAi {
             }
         }
         return true;
+    }
+
+    // magic-tools: rule 129, the target does not draw: we do ("Defined$ You"), the target is only the one who may pay
+    static boolean isPunisherDraw(final SpellAbility sa) {
+        return sa.isCurse() && "You".equals(sa.getParam("Defined")) && sa.hasParam("UnlessCost");
     }
 
     private boolean targetAI(final Player ai, final SpellAbility sa, final boolean mandatory) {
@@ -462,7 +477,9 @@ public class DrawAi extends SpellAbilityAi {
                         root.setXManaCostPaid(numCards);
                     } else {
                         // Don't draw too many cards and then risk discarding cards at EOT
-                        if (!drawback && !mandatory) {
+                        // magic-tools: rule 172, unless only spare lands would be discarded
+                        if (!drawback && !mandatory
+                                && !forge.ai.DrawOverflowAi.overflowHarmless(ai, source, computerHandSize, numCards)) {
                             return false;
                         }
                     }
@@ -544,10 +561,12 @@ public class DrawAi extends SpellAbilityAi {
 
             if ((computerHandSize + numCards > computerMaxHandSize)) {
                 // Don't draw too many cards and then risk discarding cards at EOT
+                 // magic-tools: rule 172, a cleanup discard of spare lands is no reason to keep the draw spell
                  if (game.getPhaseHandler().isPlayerTurn(ai)
                         && !sa.isTrigger()
                         && !assumeSafeX
-                        && !drawback) {
+                        && !drawback
+                        && !forge.ai.DrawOverflowAi.overflowHarmless(ai, source, computerHandSize, numCards)) {
                      return false;
                  }
 

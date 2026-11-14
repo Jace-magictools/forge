@@ -64,9 +64,41 @@ public class PermanentCreatureAi extends PermanentAi {
             return false;
         }
 
+        // magic-tools: rule 195, a haste creature that leaves at the end step must attack to be worth casting
+        if (LeavesAtEndStepAi.applies(card)) {
+            return LeavesAtEndStepAi.wantToCast(ai, card, ph);
+        }
+
+        // magic-tools: rule 93, no more plain creatures on a board already won on width (sweeper)
+        if (HoldBackAi.holdBack(ai, sa, ph)) {
+            return false;
+        }
+
+        // magic-tools: Lobelia waits for an opposing creature to die this turn (Treasures)
+        if (TreasureFlashAi.applies(card) && card.hasKeyword(Keyword.FLASH)) {
+            return TreasureFlashAi.wantToCast(ai, sa);
+        }
+
+        // magic-tools: rule 121, a flash creature whose ETB can save a creature of ours about to die
+        if (Rescue121.flashNow(ai, card)) {
+            return true;
+        }
+
+        // magic-tools: rule 122, a flash creature whose ETB counters the spell on top of the stack
+        Boolean counterNow = FlashCounter122.flashNow(ai, card);
+        if (counterNow != null) {
+            return counterNow;
+        }
+
+        // magic-tools: rule 126, Snapcaster Mage waits until the flashback it gives can be paid
+        if (Replay126.castNow(ai, sa) == Boolean.FALSE) {
+            return false;
+        }
+
         // Flash logic
         boolean advancedFlash = AiProfileUtil.getBoolProperty(ai, AiProps.FLASH_ENABLE_ADVANCED_LOGIC);
-        if (card.hasKeyword(Keyword.FLASH) || (!ai.canCastSorcery() && sa.canCastTiming(ai) && !sa.isCastFromPlayEffect())) {
+        // magic-tools: rule 286, cast by an effect (madness): no holding for a surprise block, it is now or never
+        if (!PermanentAi.isNowOrNever(ai) && (card.hasKeyword(Keyword.FLASH) || (!ai.canCastSorcery() && sa.canCastTiming(ai) && !sa.isCastFromPlayEffect()))) {
             if (advancedFlash) {
                 return doAdvancedFlashLogic(card, ai, sa);
             }
@@ -173,7 +205,8 @@ public class PermanentCreatureAi extends PermanentAi {
         } else {
             // Doesn't have a ETB trigger and doesn't seem to be good as an ambusher, try to surprise the opp before my turn
             // TODO: maybe implement a way to reserve mana for this
-            return canCastAtOppTurn ? isEOTBeforeMyTurn : isOwnEOT;
+            // magic-tools: rule 235, the end step never comes if the rest of the hand takes the mana first
+            return canCastAtOppTurn ? isEOTBeforeMyTurn || FlashStarved235.castBeforeTheManaGoes(ai, card) : isOwnEOT;
         }
     }
 

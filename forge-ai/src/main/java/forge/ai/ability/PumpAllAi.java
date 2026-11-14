@@ -22,6 +22,38 @@ import java.util.List;
 
 public class PumpAllAi extends PumpAiBase {
 
+    /**
+     * magic-tools: rule 291 (plateau, Ugin bdb5892cd; tester 11/11: Orc drums pumped the team in main 1, then no attack
+     * against two 1/4 walls). A team pump until end of turn at instant speed waits for combat, like PumpAi already does
+     * for a single creature ("save tricks until last moment"): before my attackers are declared the AI pumps for an
+     * attack it predicts, then declares another one. Kept in main 1: sorcery speed, Main1IfAble, curse, haste, a lasting
+     * Duration, a fight sub (rule 179).
+     */
+    @Override
+    protected boolean checkPhaseRestrictions(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
+        if (NewAi.on(ai, 291) && ai.getGame().getStack().isEmpty() && waitsForCombat(ai, sa)
+                && (ph.getPhase().isBefore(PhaseType.COMBAT_BEGIN) || ph.getPhase().isAfter(PhaseType.COMBAT_DECLARE_BLOCKERS))) {
+            return false;
+        }
+        return super.checkPhaseRestrictions(ai, sa, ph);
+    }
+
+    static boolean waitsForCombat(final Player ai, final SpellAbility sa) {
+        if (sa.isCurse() || sa.hasParam("Duration") || isSorcerySpeed(sa, ai) || FightGrantAi.hasFightSub(sa)
+                || "Main1IfAble".equals(sa.getParam("AILogic")) || sa.isTrigger()) {
+            return false;
+        }
+        if (!sa.getParamOrDefault("ValidCards", "").contains("YouCtrl")) {
+            return false;
+        }
+        for (SpellAbility x = sa; x != null; x = x.getSubAbility()) {
+            if (x.getParamOrDefault("KW", "").contains("Haste") || x.getApi() != sa.getApi()) {
+                return false; // haste is for main 1; another effect (draw, untap, tokens) has its own timing
+            }
+        }
+        return true;
+    }
+
     /* (non-Javadoc)
      * @see forge.card.abilityfactory.SpellAiLogic#canPlayAI(forge.game.player.Player, java.util.Map, forge.card.spellability.SpellAbility)
      */
@@ -39,6 +71,11 @@ public class PumpAllAi extends PumpAiBase {
                     || (!ph.getPlayerTurn().equals(ai) && ph.is(PhaseType.COMBAT_DECLARE_ATTACKERS)))) {
                 return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
             }
+        }
+
+        // magic-tools: rule 179, a team pump that comes with a fight (Undercity Uprising): the fight sub decides
+        if (!sa.isCurse() && FightGrantAi.hasFightSub(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         }
 
         if (abCost != null && source.hasSVar("AIPreference")) {
@@ -63,6 +100,15 @@ public class PumpAllAi extends PumpAiBase {
             }
         }
 
+        // magic-tools: rule 191, -X/-X with a chosen X is judged at the X worth paying (Toxic Deluge)
+        if (ThresholdSweepAi.isMinusXSweep(sa)) {
+            final int x = ThresholdSweepAi.bestMinusX(ai, sa, sa.getParamOrDefault("ValidCards", ""));
+            if (x < 0) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+            sa.setXManaCostPaid(x);
+        }
+
         final int power = AbilityUtils.calculateAmount(source, sa.getParam("NumAtt"), sa);
         final int defense = AbilityUtils.calculateAmount(source, sa.getParam("NumDef"), sa);
         final List<String> keywords = sa.hasParam("KW") ? Arrays.asList(sa.getParam("KW").split(" & ")) : new ArrayList<>();
@@ -73,7 +119,9 @@ public class PumpAllAi extends PumpAiBase {
         CardCollection comp = CardLists.getValidCards(ai.getCardsIn(ZoneType.Battlefield), valid, source.getController(), source, sa);
         CardCollection human = CardLists.getValidCards(opp.getCardsIn(ZoneType.Battlefield), valid, source.getController(), source, sa);
 
-        if (sa.isCurse()) {
+        // magic-tools: rule 115, our creatures the spell affects (before keeping only the ones it kills)
+        final CardCollection compAffected = new CardCollection(comp);
+        if (sa.isCurse() || ThresholdSweepAi.isMinusXSweep(sa)) {
             if (defense < 0) { // try to destroy creatures
                 comp = CardLists.filter(comp, c -> {
                     if (c.getNetToughness() <= -defense) {
@@ -120,12 +168,24 @@ public class PumpAllAi extends PumpAiBase {
 
             // evaluate both lists and pass only if human creatures are more valuable
             boolean result = (ComputerUtilCard.evaluateCreatureList(comp) + 200) < ComputerUtilCard.evaluateCreatureList(human);
+            // magic-tools: rule 115, a -X/-X sweeper that shrinks one of our attackers waits for main 2 when no
+            // creature it kills could block that attacker
+            if (result && defense < 0 && SweeperTimingAi.waitForMain2(ai, sa, compAffected, comp, human, power)) {
+                return new AiAbilityDecision(0, AiPlayDecision.WaitForMain2);
+            }
             return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         } // end Curse
 
         if (!game.getStack().isEmpty()) {
             boolean result = pumpAgainstRemoval(ai, sa, comp);
             return result ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
+        // magic-tools: rule 305, a team pump cast to attack waits for an attack worth it (Overwhelming Stampede)
+        final Boolean massPump = MassPump305Ai.castNow(ai, opp, sa, valid, power, keywords);
+        if (massPump != null) {
+            return massPump ? new AiAbilityDecision(100, AiPlayDecision.WillPlay)
+                    : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
         }
 
         boolean result = ai.getCreaturesInPlay().anyMatch(c -> c.isValid(valid, source.getController(), source, sa)

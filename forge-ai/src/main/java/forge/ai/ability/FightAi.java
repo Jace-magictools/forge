@@ -108,6 +108,11 @@ public class FightAi extends SpellAbilityAi {
         if ("Always".equals(sa.getParam("AILogic"))) {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay); // e.g. Hunt the Weak, the AI logic was already checked through canFightAi
         }
+        // magic-tools: rule 179, a parent with AILogic Fight / PowerDmg already chose both fighters in canFight,
+        // with its pump counted (Blizzard Brawl): judging the bare fight again refused it
+        if (sa.isTargetNumberValid() && sa.getTargets().size() > 0 && FightGrantAi.parentChoseFight(sa)) {
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
 
         return checkApiLogic(aiPlayer, sa);
     }
@@ -193,6 +198,12 @@ public class FightAi extends SpellAbilityAi {
             power = 0;
             toughness = 0;
         }
+        // magic-tools: rule 179, keywords the spell grants our fighter (Blizzard Brawl, Outmuscle)
+        final boolean[] granted = FightGrantAi.grants(sa);
+        if (!FightGrantAi.conditionsHold(sa)) { // e.g. Blizzard Brawl without three snow permanents
+            power = 0;
+            toughness = 0;
+        }
         // Get sorted creature lists
         CardCollection aiCreatures = ai.getCreaturesInPlay();
         CardCollection humCreatures = ai.getOpponents().getCreaturesInPlay();
@@ -250,7 +261,7 @@ public class FightAi extends SpellAbilityAi {
                         }
                         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
                     }
-                } else if (shouldFight(aiCreature, humanCreature, power, toughness)) {
+                } else if (shouldFight(aiCreature, humanCreature, power, toughness, granted)) {
                     if ("Time to Feed".equals(sourceName)) { // flip targets
                         final Card tmp = aiCreature;
                         aiCreature = humanCreature;
@@ -297,9 +308,11 @@ public class FightAi extends SpellAbilityAi {
         return 0;
     }
 
-    private static boolean shouldFight(Card fighter, Card opponent, int pumpAttack, int pumpDefense) {
-    	if (canKill(fighter, opponent, pumpAttack)) {
-    		if (!canKill(opponent, fighter, -pumpDefense)) { // can survive
+    private static boolean shouldFight(Card fighter, Card opponent, int pumpAttack, int pumpDefense, boolean[] granted) {
+        final boolean kills = canKill(fighter, opponent, pumpAttack)
+                || granted[1] && FightGrantAi.deathtouchKills(fighter, opponent, pumpAttack); // magic-tools: rule 179
+    	if (kills) {
+    		if (granted[0] || !canKill(opponent, fighter, -pumpDefense)) { // can survive (rule 179: indestructible)
     		    return true;
     		}
     		if (MyRandom.getRandom().nextInt(20) < (opponent.getCMC() - fighter.getCMC())) { // trade

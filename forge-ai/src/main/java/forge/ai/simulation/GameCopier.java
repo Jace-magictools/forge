@@ -99,6 +99,9 @@ public class GameCopier {
             newPlayer.setDamageReceivedThisTurn(origPlayer.getDamageReceivedThisTurn());
             newPlayer.setLandsPlayedThisTurn(origPlayer.getLandsPlayedThisTurn());
             newPlayer.setCounters(HashMultiset.create(origPlayer.getCounters()));
+            // magic-tools: the Radiation effect travels with the copied command zone (like blessing below);
+            // the one setCounters just created is outside the object map and made reverseFind return null (D126).
+            newPlayer.removeRadiationEffect();
             newPlayer.setSpeed(origPlayer.getSpeed());
             // Blessing state travels with the copied command-zone effect card
             // (wired via copyEffectCardsToSnapshot below); calling setBlessing
@@ -260,6 +263,11 @@ public class GameCopier {
             otherCard.setGameTimestamp(card.getGameTimestamp());
             otherCard.setLayerTimestamp(card.getLayerTimestamp());
             otherCard.setSickness(card.hasSickness());
+            // face retournée d'une carte non-jeton (Howlpack Avenger, jour/nuit) : sans le drapeau backside, la copie
+            // de recherche retombait sur sa face avant (demande D30 de combos-forge, 31/10)
+            if (card.isBackSide() && !card.isToken()) {
+                otherCard.setBackSide(true);
+            }
             otherCard.setState(card.getCurrentStateName(), false);
             if (card.isAttachedToEntity()) {
                 GameEntity ge = gameObjectMap.map(card.getEntityAttachedTo());

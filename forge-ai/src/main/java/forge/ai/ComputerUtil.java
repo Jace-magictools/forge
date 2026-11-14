@@ -326,6 +326,8 @@ public class ComputerUtil {
             }
         }
         if (pref.contains("SacCost")) {
+            // magic-tools: a loop that wins (Redcap damage, Altar milling the opponent out) goes on whatever it feeds
+            final boolean winningLoop = sa != null && PersistLoopAi.anyLoopCard(ai, sa) != null;
             // search for permanents with SacMe. priority 1 is the lowest, priority 5 the highest
             for (int ip = 0; ip < 6; ip++) {
                 final int priority = 6 - ip;
@@ -336,12 +338,23 @@ public class ComputerUtil {
                         return ComputerUtilCard.getWorstLand(landsInPlay);
                     }
                 }
-                final CardCollection sacMeList = CardLists.filter(typeList, c -> (c.hasSVar("SacMe") && Integer.parseInt(c.getSVar("SacMe")) == priority)
-                        || (priority == 1 && shouldSacrificeThreatenedCard(ai, c, sa))
+                // magic-tools: a creature that comes back (Melira gives SacMe to persist creatures) is not looped
+                // while an opponent's permanent profits from each death or return (Soul Warden, Blood Artist)
+                final CardCollection sacMeList = CardLists.filter(typeList, c -> ((c.hasSVar("SacMe") && Integer.parseInt(c.getSVar("SacMe")) == priority)
+                        || (priority == 1 && shouldSacrificeThreatenedCard(ai, c, sa)))
+                        && (winningLoop || !(ComputerUtilCard.hasActiveUndyingOrPersist(c) && FodderAi.feedsOpponent(ai, c)))
                 );
                 if (!sacMeList.isEmpty()) {
                     CardLists.shuffle(sacMeList);
                     return sacMeList.getFirst();
+                }
+            }
+
+            // magic-tools: general sacrifice rule, pay with what is worth less than the effect (FodderAi)
+            if (!AiProfileUtil.getBoolProperty(ai, AiProps.SACRIFICE_DEFAULT_PREF_ENABLE)) {
+                final Card fodder = FodderAi.choose(ai, typeList, sa);
+                if (fodder != null) {
+                    return fodder;
                 }
             }
 
@@ -368,6 +381,19 @@ public class ComputerUtil {
                     CardLists.sortByCmcDesc(allowList);
                     return allowList.getLast();
                 }
+            }
+
+            // magic-tools: rule 177, a creature paid to remove an opponent's permanent worth clearly more
+            // (Dusk Rose Reliquary, Bone Splinters), whatever the profile's default preference
+            final Card removalFodder = RemovalSacAi.choose(ai, typeList, sa);
+            if (removalFodder != null) {
+                return removalFodder;
+            }
+
+            // magic-tools: rule 11, a land sacrificed to destroy an opponent's land (Raze) is an even trade
+            final Card tradedLand = LandTradeAi.landToTrade(ai, typeList, sa);
+            if (tradedLand != null) {
+                return tradedLand;
             }
 
             // Sac lands
@@ -442,6 +468,13 @@ public class ComputerUtil {
                 return SpecialCardAi.SurvivalOfTheFittest.considerDiscardTarget(ai);
             }
 
+            // magic-tools: rule 19, a fatty that cannot be cast soon pays the discard when the deck can reanimate it
+            // (Sparkhunter Masticore discarding Akroma in Profanation; before: the spell was never cast)
+            final Card reanimationFodder = ReanimatorAi.discardForReanimation(ai, typeList, activate);
+            if (reanimationFodder != null) {
+                return reanimationFodder;
+            }
+
             // Discard lands
             final CardCollection landsInHand = CardLists.getType(typeList, "Land");
             if (!landsInHand.isEmpty()) {
@@ -453,10 +486,21 @@ public class ComputerUtil {
                     // Don't need more land
                     return ComputerUtilCard.getWorstLand(landsInHand);
                 }
+                // magic-tools: rule 27, a spell's additional discard cost is paid with a spare land: with that land
+                // gone, the lands in play and in hand still cast every other spell in hand, and there are at least 4
+                // (Profanation kept Sparkhunter Masticore with 4 lands, Condemn and Marsh Flats; before: 6 lands in play)
+                if (activate != null && !activate.isInPlay()) {
+                    final int otherCMC = Aggregates.max(CardLists.filter(nonLandsInHand, c -> !c.equals(activate)), Card::getCMC);
+                    final int landsLeft = numLandsInPlay + landsInHand.size() - 1;
+                    if (landsLeft >= Math.max(4, Math.max(otherCMC, activate.getCMC()))) {
+                        return ComputerUtilCard.getWorstLand(landsInHand);
+                    }
+                }
             }
 
-            CardCollection replayKW = typeList.filter(c -> c.hasKeyword(Keyword.DISTURB) || c.hasKeyword(Keyword.ESCAPE) || c.hasKeyword(Keyword.DISTURB)
-                    || c.hasKeyword(Keyword.FLASHBACK));
+            // magic-tools: every card that still works from the graveyard (embalm, eternalize, unearth, jump-start,
+            // encore, scavenge too; before: flashback, escape, disturb only)
+            CardCollection replayKW = typeList.filter(c -> BazaarAi.graveyardValue(c) && !c.hasSVar("DoNotDiscardIfAble"));
             if (!replayKW.isEmpty()) {
                 return Aggregates.random(replayKW);
             }
@@ -558,6 +602,8 @@ public class ComputerUtil {
 
         // don't sacrifice the card we're pumping
         typeList = ComputerUtilCost.paymentChoicesWithoutTargets(typeList, ability, ai);
+        // magic-tools: Arcbound Ravager does not eat itself (ArtifactSacAi)
+        typeList = ArtifactSacAi.withoutHost(typeList, ability);
 
         // if the source has "Casualty", don't sacrifice cards that may have granted the effect
         // TODO: is there a surefire way to determine which card added Casualty?
@@ -571,6 +617,68 @@ public class ComputerUtil {
 
         final CardCollection sacList = new CardCollection();
         int count = 0;
+
+        // magic-tools: keep the persist loop going (Melira + Murderous Redcap)
+        if (!effect && amount == 1) {
+            final Card loop = PersistLoopAi.anyLoopCard(ai, ability);
+            if (loop != null && typeList.contains(loop)) {
+                sacList.add(loop);
+                return sacList;
+            }
+            // magic-tools: Birthing Pod upgrading into the missing loop piece
+            final Card[] pod = PodComboAi.plan(ai, ability);
+            if (pod != null && typeList.contains(pod[0])) {
+                sacList.add(pod[0]);
+                return sacList;
+            }
+        }
+
+        // magic-tools: rule 204, the only sacrifice outlet does not pay a Pod upgrade when a loop piece waits
+        if (!effect) {
+            typeList = SacUpgradeAi.withoutKeptOutlet(ai, typeList, ability);
+            // magic-tools: rule 210, nor with the only source of a color a spell in hand needs
+            typeList = SoleColorAi.withoutSoleSource(ai, typeList);
+        }
+
+        // magic-tools: rule 141, the lethal sacrifice plan pays with the weakest creature that is not a payoff
+        if (!effect && amount == 1) {
+            final Card fodder = AristocratAi.chooseFodder(ai, ability, typeList);
+            if (fodder != null) {
+                sacList.add(fodder);
+                return sacList;
+            }
+        }
+
+        // magic-tools: rule 243, the outlet pays with the creature that comes back and replays its enter trigger
+        if (!effect && amount == 1) {
+            final Card rebuy = SacRebuyAi.chooseFodder(ai, ability, typeList);
+            if (rebuy != null) {
+                sacList.add(rebuy);
+                return sacList;
+            }
+        }
+
+        // magic-tools: a creature stolen until end of turn goes back to its owner anyway: pay with it first
+        if (!effect) {
+            for (final Card c : CardLists.filter(typeList, c -> ThreatenSacAi.isStolenUntilEot(ai, c))) {
+                if (count < amount) {
+                    sacList.add(c);
+                    typeList.remove(c);
+                    count++;
+                }
+            }
+        }
+
+        // magic-tools: rule 116, a creature our own effect is about to sacrifice goes first
+        if (!effect) {
+            for (final Card c : CardLists.filter(typeList, c -> OwnSacrificeAi.isDoomed(ai, c))) {
+                if (count < amount) {
+                    sacList.add(c);
+                    typeList.remove(c);
+                    count++;
+                }
+            }
+        }
 
         while (count < amount) {
             Card prefCard = getCardPreference(ai, source, "SacCost", typeList, ability);
@@ -704,11 +812,20 @@ public class ComputerUtil {
 
         CardLists.sortByPowerAsc(typeList);
         // TODO prefer noncreatures without tap abilities
+        // magic-tools: rule 196, a mana ability taps first what makes no mana itself (summoning sick, no mana ability)
+        if (TapEngineAi.isEngine(activate)) {
+            // magic-tools: rule 203, and before anything what the spell being paid will untap (Nettle Sentinel)
+            typeList.sort(java.util.Comparator.comparingInt(c -> TapEngineAi.tapRank(ai, c)));
+        }
 
         final CardCollection tapList = new CardCollection();
 
         for (int i = 0; i < amount; i++) {
             tapList.add(typeList.get(i));
+        }
+        // magic-tools: keep the blockers needed to survive the next attack (Heritage Druid, Birchlore Rangers)
+        if (BlockerReserveAi.tapsTooMany(ai, sa, tapList)) {
+            return null;
         }
         return tapList;
     }
@@ -788,6 +905,10 @@ public class ComputerUtil {
         }
 
         CardLists.sortByPowerAsc(typeList);
+        if ("UntapManaCreature".equals(sa.getParam("AILogic"))) {
+            // renvoyer d'abord ce qui est déjà engagé (Forêt ou Elfe qui a déjà donné son mana)
+            typeList = forge.ai.ability.UntapAi.orderReturnPayment(ai, typeList);
+        }
         final CardCollection returnList = new CardCollection();
 
         for (int i = 0; i < amount; i++) {
@@ -801,9 +922,18 @@ public class ComputerUtil {
         CardCollection remaining = new CardCollection(cardlist);
         final CardCollection sacrificed = new CardCollection();
         final Card host = source.getHostCard();
+        // magic-tools: rule 263, an edict takes another permanent than the key cards of the deck plan when it can
+        if (!isOptional && !"Bontu".equals(source.getParam("AILogic"))) {
+            final CardCollection planKeep = DeckPlanAi.keepForSacrifice(ai, remaining, amount);
+            if (planKeep != null) {
+                remaining.retainAll(planKeep);
+            }
+        }
         final int considerSacThreshold = getAIPreferenceParameter(host, "CreatureEvalThreshold", source);
 
-        if ("OpponentOnly".equals(source.getParam("AILogic"))) {
+        if ("Bontu".equals(source.getParam("AILogic"))) {
+            return BontuAi.choose(ai, cardlist, source); // magic-tools
+        } else if ("OpponentOnly".equals(source.getParam("AILogic"))) {
             if (!source.getActivatingPlayer().isOpponentOf(ai)) {
                 return sacrificed; // sacrifice none
             }
@@ -1161,6 +1291,76 @@ public class ComputerUtil {
             }
         }
 
+        // magic-tools: spend the mana of creatures that are about to attack (ElfBall)
+        if (ManaDorkMain1Ai.castBeforeCombat(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 270, a removal permanent for an opponent anthem that is on or about to turn on
+        if (ThresholdRemoval270.removalNow(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 267, a permanent that repeats the effect of a one-shot spell in hand, before that spell
+        if (RecurringFirst267.priority(ai, sa) > 0) {
+            return true;
+        }
+
+        // magic-tools: rule 266, a creature whose "beginning of combat on your turn" trigger would fire this turn
+        if (CombatStartTrigger266.castNow(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 265, a creature that blocks the evasive attacker that kills us next turn
+        if (EvasiveBlocker265.castNow(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 264, a mana creature that competes with a noncreature mana permanent of the same cost
+        if (NewAi.on(ai, 264) && ManaRampAi.sickFirstMain1(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 67, an early mana dork goes before the spells it would otherwise leave behind in main 1
+        if (ManaBaseFirstAi.goesFirst(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 230, Isochron Scepter and the like before the creatures that would take their mana
+        if (ImprintFirstAi.goesFirst(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 196, a chain of spells paid by tapping Elves: the attack would tap them
+        if (TapEngineAi.startsChain(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 103, a payoff with cards in hand that it would count comes down before them
+        if (ArrivalPayoffAi.countsCardInHand(ai, card)) {
+            return true;
+        }
+
+        // magic-tools: creatures pumped by our own instants and sorceries come before the spells (Balmor)
+        if (SpellCastMain1Ai.castBeforeSpells(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: permanents that trigger when our creatures attack come before combat (Winota)
+        if (AttackTriggerMain1Ai.castBeforeAttack(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 302, a permanent that makes one of our attackers bigger (counter trigger, lord) before combat
+        if (AttackerBuff302Ai.castBeforeAttack(ai, sa)) {
+            return true;
+        }
+
+        // magic-tools: rule 216, a permanent that lifts an attack limit of a ready creature (second Hammerskull)
+        if (AttackUnlockAi.castBeforeAttack(ai, sa)) {
+            return true;
+        }
+
         // cast Backup creatures in main 1 to pump attackers
         if (cardState.hasKeyword(Keyword.BACKUP)) {
             for (Card potentialAtkr: ai.getCreaturesInPlay()) {
@@ -1187,6 +1387,11 @@ public class ComputerUtil {
                     return false;
                 }
             }
+        }
+
+        // magic-tools: rule 202, what finds cards goes before the attack
+        if (DrawFirstAi.permanentFindsCards(ai, sa)) {
+            return true;
         }
 
         // ideally we'd check with cost reducers included
@@ -1307,6 +1512,11 @@ public class ComputerUtil {
         final SpellAbility sub = sa.getSubAbility();
 
         if (source != null && "ALWAYS".equals(source.getSVar("PlayMain1"))) {
+            return true;
+        }
+
+        // magic-tools: rule 202, a draw or dig spell goes before the attack (Lead the Stampede)
+        if (DrawFirstAi.spellFindsCards(ai, sa)) {
             return true;
         }
 
@@ -1683,6 +1893,12 @@ public class ComputerUtil {
 
         // Can only Predict things from AFs
         if (threatApi == null) {
+            return threatened;
+        }
+
+        // magic-tools: rule 116, our own mandatory "sacrifice this" (unpaid echo, evoke, end step) threatens its host
+        if (OwnSacrificeAi.threatensHost(aiPlayer, saviourApi, topStack)) {
+            threatened.add(source);
             return threatened;
         }
 
@@ -2069,6 +2285,10 @@ public class ComputerUtil {
                     ComputerUtilCombat.combatantWouldBeDestroyed(ai, source, game.getCombat())) {
                 return true;
             }
+        } else if (zone.getZoneType() == ZoneType.Graveyard && sa.isFlashback() && sa.getKeyword() != null
+                && !sa.getKeyword().isIntrinsic()) {
+            // magic-tools: rule 126, a flashback granted until end of turn (Snapcaster Mage) is played now or lost
+            return true;
         } else if (zone.getZoneType() == ZoneType.Exile && sa.getMayPlay() != null) {
             // play cards in exile that can only be played that turn
             if (game.getPhaseHandler().getPhase() == PhaseType.MAIN2) {
@@ -2103,11 +2323,15 @@ public class ComputerUtil {
             return finalHandSize;
         }
 
-        final CardCollectionView lands = CardLists.filter(handList, c -> c.getManaCost().getCMC() <= 0 && !c.hasSVar("NeedsToPlay")
-                && (c.isLand() || c.isArtifact()));
+        // magic-tools: rule 241, a land waiting for another land of the hand is a land (MulliganAi.withConditionalLands)
+        final CardCollectionView lands = MulliganAi.withConditionalLands(handList, ai,
+                CardLists.filter(handList, c -> c.getManaCost().getCMC() <= 0 && !c.hasSVar("NeedsToPlay")
+                && (c.isLand() || c.isArtifact())));
 
         final int handSize = handList.size();
-        final int landSize = lands.size();
+        // magic-tools: one-mana mana creatures/artifacts castable from the hand's lands count as lands (MulliganAi)
+        final int landSize = lands.size() + MulliganAi.cheapManaSources(handList, lands);
+        final int realLandSize = lands.size();
         int score = handList.size();
         //adjust score for Living End decks
         final CardCollectionView livingEnd = CardLists.filter(handList, c -> "Living End".equalsIgnoreCase(c.getName()));
@@ -2137,19 +2361,22 @@ public class ComputerUtil {
                 return handSize;
             }
             return 0;
-        } else if (landSize == handSize) {
+        } else if (realLandSize == handSize) {
             if (library.size()/landsInDeck < 2) {
                 // Heavy land deck/Momir Basic it's ok
                 return handSize;
             }
             return 0;
-        } else if (handSize >= 7 && landSize >= handSize-1) {
+        } else if (handSize >= 7 && realLandSize >= handSize-1) {
             // BAD Hands - Mana flooding
 
             if (library.size()/landsInDeck < 2) {
                 // Heavy land deck/Momir Basic it's ok
                 return handSize;
             }
+            return 0;
+        } else if (cardsToReturn == 0 && MulliganAi.floodedForCurve(handList, library, realLandSize)) {
+            // magic-tools: 5 lands of 7 in a low-curve deck (Discard: 21 lands, mean mana value 2.2)
             return 0;
         }
         return score;
@@ -2158,7 +2385,10 @@ public class ComputerUtil {
     // Computer mulligans if there are no cards with converted mana cost of 0 in its hand
     public static boolean wantMulligan(Player ai, int cardsToReturn) {
         final CardCollectionView handList = ai.getCardsIn(ZoneType.Hand);
-        return !handList.isEmpty() && scoreHand(handList, ai, cardsToReturn) <= 0;
+        if (handList.isEmpty()) {
+            return false;
+        }
+        return scoreHand(handList, ai, cardsToReturn) <= 0;
     }
 
     public static CardCollection getPartialParisCandidates(Player ai) {
@@ -2299,7 +2529,7 @@ public class ComputerUtil {
     public static CardCollection getCardsToDiscardFromOpponent(Player chooser, Player discarder, SpellAbility sa, CardCollection validCards, int min, int max) {
         // Focus on keycards
         boolean foundKeycard = false;
-        List<String> keyCards = discarder.getRegisteredPlayer().getDeck().getKeyCards();
+        List<String> keyCards = DeckPlanAi.keyCards(discarder); // magic-tools: rule 263, through the deck plan switches
         CardCollection goodChoices = CardLists.filter(validCards, c -> keyCards.contains(c.getName()) && !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));
         if (goodChoices.isEmpty()) {
             goodChoices = CardLists.filter(validCards, c -> !c.hasSVar("DiscardMeByOpp") && !c.hasSVar("DiscardMe"));
@@ -2318,6 +2548,12 @@ public class ComputerUtil {
         if (min == 1 && max == 1) {
             if (foundKeycard) {
                 return new CardCollection(goodChoices.getFirst());
+            }
+
+            // magic-tools: rule 84, the card that would remove our best creature first
+            final Card answer = DiscardChoiceAi.answerToOurThreat(chooser, discarder, goodChoices);
+            if (answer != null) {
+                return new CardCollection(answer);
             }
 
             Card nearTermThreat = getBestNearTermDiscardThreat(discarder, goodChoices);
@@ -2933,7 +3169,7 @@ public class ComputerUtil {
     }
 
     public static int evaluateBoardPosition(final Player ai, final Player opponent) {
-        return AiCache.getCached("evaluateBoardPosition",
+        return AiCache.getCached(AiCache.Scope.PRIORITY, "evaluateBoardPosition",
                 () -> evaluateBoardPositionChanged(ai, opponent),
                 List.of(AiCache::identity, AiCache::identity), ai, opponent);
     }
@@ -3179,7 +3415,7 @@ public class ComputerUtil {
     // call this to determine if it's safe to use a life payment spell
     // or trigger "emergency" strategies such as holding mana for Spike Weaver or Counterspell.
     public static boolean aiLifeInDanger(Player ai, boolean serious, int payment) {
-        return Integer.MIN_VALUE == AiCache.getCached("aiLifeInDanger", () -> predictNextCombatsRemainingLife(ai, serious, false, payment, null),
+        return Integer.MIN_VALUE == AiCache.getCached(AiCache.Scope.PRIORITY, "aiLifeInDanger", () -> predictNextCombatsRemainingLife(ai, serious, false, payment, null),
                 List.of(AiCache::identity, Objects::equals, Objects::equals), ai, serious, payment);
     }
     public static int predictNextCombatsRemainingLife(Player ai, boolean serious, boolean checkDiff, int payment, final CardCollection excludedBlockers) {
@@ -3216,7 +3452,7 @@ public class ComputerUtil {
                 continue;
             }
             // TODO if it's next turn ignore mustBlockCards
-            AiBlockController block = new AiBlockController(ai, false);
+            AiBlockController block = new AiBlockController(ai, ai);
             // TODO for performance skip ahead to safer blocking approach (though probably only when not in checkDiff mode as that could lead to inflated prediction)
             block.assignBlockersForCombat(combat, excludedBlockers);
 

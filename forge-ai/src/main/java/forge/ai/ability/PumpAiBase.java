@@ -347,6 +347,9 @@ public abstract class PumpAiBase extends SpellAbilityAi {
                     && CombatUtil.canBlock(card);
         } else if (keyword.equals("Shroud") || keyword.equals("Hexproof")) {
             return ComputerUtil.predictThreatenedObjects(sa.getActivatingPlayer(), sa).contains(card);
+        } else if (keyword.equals("Undying")) {
+            // magic-tools: only on a creature about to die (UndyingSaveAi)
+            return UndyingSaveAi.isUseful(ai, card);
         } else if (keyword.equals("Persist")) {
             return card.getBaseToughness() > 1 && !card.hasKeyword(Keyword.UNDYING);
         } else if (keyword.startsWith("Landwalk:")) {
@@ -358,7 +361,16 @@ public abstract class PumpAiBase extends SpellAbilityAi {
         } else if (keyword.equals("Prevent all combat damage that would be dealt to CARDNAME.")) {
             return combat != null && (combat.isBlocking(card) || combat.isBlocked(card));
         } else if (keyword.equals("Menace")) {
+            // magic-tools rule 290 (plateau, Ugin fae8a260e, tester 11/11 « Tambour activé après les bloqueurs, alors
+            // qu'il donne la menace ») : like the other evasions, menace is useless once blockers are declared
+            if (NewAi.on(ai, 290) && ph.getPhase().isAfter(PhaseType.COMBAT_DECLARE_ATTACKERS)) {
+                return false;
+            }
             return combat != null && combat.isAttacking(card);
+        } else if (keyword.equals("Skulk") && NewAi.on(ai, 290)) {
+            return !ph.isPlayerTurn(opp) && ((combat != null && combat.isAttacking(card)) || CombatUtil.canAttack(card, opp))
+                    && !ph.getPhase().isAfter(PhaseType.COMBAT_DECLARE_ATTACKERS)
+                    && newPower > 0;
         }
         return true;
     }
@@ -373,7 +385,9 @@ public abstract class PumpAiBase extends SpellAbilityAi {
     protected CardCollection getPumpCreatures(final Player ai, final SpellAbility sa, final int defense, final int attack,
             final List<String> keywords, final boolean immediately) {
         CardCollection list = CardLists.getTargetableCards(ai.getCreaturesInPlay(), sa);
-        list = CardLists.filter(list, c -> ComputerUtilCard.shouldPumpCard(ai, sa, c, defense, attack, keywords, immediately));
+        // magic-tools: rule 189, Double and Triple are worth what the target has
+        list = CardLists.filter(list, c -> ComputerUtilCard.shouldPumpCard(ai, sa, c, DoublePumpAi.defenseOn(sa, c, defense),
+                DoublePumpAi.attackOn(sa, c, attack), keywords, immediately));
         return list;
     }
 

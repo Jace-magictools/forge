@@ -589,6 +589,12 @@ public class ComputerUtilCard {
         return Aggregates.itemWithMax(list, c -> evaluateRemovalTargetPriority(ai, c));
     }
 
+    private static boolean isBlankCreatureToken(final Card c) {
+        return c.isCreature() && c.getKeywords().isEmpty()
+                && c.getSpellAbilities().stream().noneMatch(sa -> sa.isAbility())
+                && c.getTriggers().isEmpty() && c.getStaticAbilities().isEmpty();
+    }
+
     private static int evaluateRemovalTargetPriority(final Player ai, final Card c) {
         int value;
         if (c.isCreature()) {
@@ -603,12 +609,18 @@ public class ComputerUtilCard {
         }
 
         // tokens are slightly better since they'll be gone forever
-        if (c.isToken()) {
+        // magic-tools: rule 217, a token without any text loses nothing forever: a Soul Warden goes before it
+        if (c.isToken() && !isBlankCreatureToken(c)) {
             value += 30;
         }
 
         if (c.getController().isOpponentOf(ai)) {
             value += ComputerUtil.evaluateBoardPosition(ai, c.getController()) / 4;
+            // magic-tools: rule 276, a piece of a combo of the opponent's plan (Combo$) is the removal's first target
+            // (first version on every key card: duel 49,7 %, z -1,36, too wide)
+            if (NewAi.on(ai, 276) && DeckPlanAi.isComboPiece(c.getController(), c)) {
+                value += 200;
+            }
         }
         return value;
     }
@@ -855,7 +867,7 @@ public class ComputerUtilCard {
      * @return list of creatures assigned to block in the simulation
      */
     public static CardCollectionView getLikelyBlockers(final Player ai, final CardCollectionView blockers) {
-        AiBlockController aiBlk = new AiBlockController(ai, false);
+        AiBlockController aiBlk = new AiBlockController(ai, ai);
         final Player opp = AiAttackController.choosePreferredDefenderPlayer(ai);
         Combat combat = new Combat(opp);
         //Use actual attackers if available, else consider all possible attackers
@@ -893,19 +905,22 @@ public class ComputerUtilCard {
     /**
      * Check if an attacker can be blocked profitably (ie. kill attacker)
      *
-     * @param ai       controller of attacking creature
-     * @param attacker attacking creature to evaluate
+     * @param ai            player who would block the attacker
+     * @param attacker      attacking creature to evaluate
+     * @param checkingOther true when an AI is predicting another player's blocks; the attacker's controller is then taken as that AI
      * @return attacker will die
      */
     public static boolean canBeBlockedProfitably(final Player ai, Card attacker, boolean checkingOther) {
-        AiBlockController aiBlk = new AiBlockController(ai, checkingOther);
+        AiBlockController aiBlk = new AiBlockController(ai, checkingOther ? attacker.getController() : ai);
         Combat combat = new Combat(ai);
         // avoid removing original attacker
         attacker.setCombatLKI(null);
         combat.addAttacker(attacker, ai);
         final List<Card> attackers = Lists.newArrayList(attacker);
         aiBlk.assignBlockersGivenAttackers(combat, attackers);
-        return ComputerUtilCombat.attackerWouldBeDestroyed(ai, attacker, combat);
+        // magic-tools rule 161: an attacker that can give itself indestructible survives the block
+        return ComputerUtilCombat.attackerWouldBeDestroyed(ai, attacker, combat)
+                && !SelfIndestructibleAi.canSelfIndestructible(attacker);
     }
 
     public static boolean canBeKilledByRoyalAssassin(final Player ai, final Card card) {
@@ -1242,6 +1257,26 @@ public class ComputerUtilCard {
             return true;
         }
 
+        // magic-tools: rule 126, a flashback granted until end of turn (Snapcaster Mage) is lost if kept
+        if (sa.isFlashback() && sa.getKeyword() != null && !sa.getKeyword().isIntrinsic()) {
+            return true;
+        }
+
+        // magic-tools: rule 124, the free copy of Isochron Scepter comes back every turn: never kept for later
+        if (ScepterAi.isFreeCopy()) {
+            return true;
+        }
+
+        // magic-tools: rule 74, unconditional removal is kept for a real threat when a creature of our hand can use
+        // the mana (Cast Down on Trinket Mage instead of Cordial Vampire, Oblivion Ring on Nightsky Mimic)
+        if (RemovalReserveAi.holdForThreat(sa, c, dmg)) {
+            return false;
+        }
+        // magic-tools: rule 281, against a combo plan the last removal waits for a combo piece
+        if (RemovalReserveAi.holdForCombo(sa, c, dmg)) {
+            return false;
+        }
+
         //interrupt 1: Check whether a possible blocker will be killed for the AI to make a bigger attack
         if (ph.is(PhaseType.MAIN1) && ph.isPlayerTurn(ai) && c.isCreature()) {
             AiAttackController aiAtk = new AiAttackController(ai);
@@ -1340,6 +1375,11 @@ public class ComputerUtilCard {
             valueTempo /= 2;    //bouncing non-tokens for tempo is less valuable
         }
         if (c.isLand()) {
+            // magic-tools: rule 11, sorcery-speed land destruction is not worth holding (no better land target will
+            // come, and denial matters most early): Stone Rain, Raze, Pillage were cast at random in MAIN2
+            if (LandTradeAi.castNow(sa, c, ai)) {
+                return true;
+            }
             valueTempo += 0.5f / opp.getLandsInPlay().size();   //set back opponent's mana
             if ("Land".equals(sa.getParam("ValidTgts")) && ph.getPhase().isAfter(PhaseType.COMBAT_END)) {
                 valueTempo += 0.5; // especially when nothing else can be targeted
@@ -1362,7 +1402,9 @@ public class ComputerUtilCard {
                 threat += 1.0f * ComputerUtilCombat.damageIfUnblocked(c, ai, combat, true) / ai.getLife();
                 //TODO:add threat from triggers and other abilities (ie. Master of Cruelties)
             }
-            if (ph.isPlayerTurn(ai) && phaseType.isAfter(PhaseType.COMBAT_DECLARE_BLOCKERS)) {
+            // magic-tools: rule 39, a sorcery has no later chance before the creature attacks
+            if (ph.isPlayerTurn(ai) && phaseType.isAfter(PhaseType.COMBAT_DECLARE_BLOCKERS)
+                    && !SorceryRemovalAi.lastChanceBeforeAttack(sa, ai)) {
                 threat *= 0.1f;
             }
             if (!ph.isPlayerTurn(ai) &&
@@ -1528,8 +1570,35 @@ public class ComputerUtilCard {
             return true;
         }
 
+        // magic-tools rule 57: a sorcery-speed pump that only grants keywords (Assault Strobe) is worth it
+        // on a creature that attacks anyway when it raises the damage dealt if unblocked
+        // (Poudlar, v8 tournament: Assault Strobe still in hand in 55 % of its losses, never cast).
+        if (phase.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS)
+                && phase.isPlayerTurn(ai)
+                && (SpellAbilityAi.isSorcerySpeed(sa, ai) || main1Preferred)
+                && power <= 0 && keywords != null && !keywords.isEmpty()
+                && doesCreatureAttackAI(ai, c)) {
+            final Player defender = ai.getWeakestOpponent();
+            final Card pumpedAttacker = getPumpedCreature(ai, sa, c, toughness, power, keywords);
+            // magic-tools rule 183: an attack made only because it is free (a wall that survives it) stays a free one
+            if (ComputerUtilCombat.damageIfUnblocked(pumpedAttacker, defender, combat, true)
+                    > ComputerUtilCombat.damageIfUnblocked(c, defender, combat, true)
+                    && !FreeAttackAi.stoppedForFree(ai, pumpedAttacker, defender, combat)) {
+                return true;
+            }
+        }
+
         // buff attacker/blocker using triggered pump (unless it's lethal and we don't want to be reckless)
-        if (immediately && phase.getPhase().isBefore(PhaseType.COMBAT_DECLARE_BLOCKERS) && !loseCardAtEOT) {
+        // magic-tools rule 82: not for a spell cast from hand that only looks "immediate" (the adventure half of
+        // Rimrock Knight has no zone while it is evaluated): that is a combat trick, handled below
+        final boolean handSpell = sa.isSpell() && !sa.isCopied() && !sa.isTrigger();
+        // magic-tools: rule 266, haste alone goes to a creature that needs it (Surrak's formidable gave it to a Craw
+        // Wurm that could already attack, Surrak stayed home)
+        final Boolean hasteOnly = CombatStartTrigger266.hasteTarget(ai, c, toughness, power, keywords);
+        if (hasteOnly != null) {
+            return hasteOnly;
+        }
+        if (immediately && !handSpell && phase.getPhase().isBefore(PhaseType.COMBAT_DECLARE_BLOCKERS) && !loseCardAtEOT) {
             if (phase.isPlayerTurn(ai)) {
                 if (CombatUtil.canAttack(c) || (phase.inCombat() && c.isAttacking())) {
                     return true;
@@ -1579,6 +1648,10 @@ public class ComputerUtilCard {
 
         //create and buff attackers
         if (phase.getPhase().isBefore(PhaseType.COMBAT_DECLARE_ATTACKERS) && phase.isPlayerTurn(ai) && opp.getLife() > 0) {
+            // magic-tools rule 180: a sorcery-speed pump that makes a creature attack, counting its own cast triggers
+            if (!simAI && SorceryPumpAttackAi.castNow(ai, sa, c, toughness, power, keywords, opp, combat)) {
+                return true;
+            }
             //1. become attacker for whatever reason
             if (!doesCreatureAttackAI(ai, c) && doesSpecifiedCreatureAttackAI(ai, pumped)) {
                 float threat = 1.0f * ComputerUtilCombat.damageIfUnblocked(pumped, opp, combat, true) / opp.getLife();
@@ -1598,7 +1671,7 @@ public class ComputerUtilCard {
                         && sa.hasParam("NumAtt") && sa.getHostCard() != null
                         && sa.getHostCard().isInZone(ZoneType.Hand)
                         && c.getNetPower() > 0 // too obvious if attacking with a 0-power creature
-                        && sa.getHostCard().isInstant() // only do it for instant speed spells in hand
+                        && (sa.getHostCard().isInstant() || isInstantSpellState(sa)) // only do it for instant speed spells in hand
                         && ComputerUtilMana.hasEnoughManaSourcesToCast(sa, ai)) {
                     combatTrick = true;
 
@@ -1762,7 +1835,20 @@ public class ComputerUtilCard {
                         }
                         if (totalPowerUnblocked >= opp.getLife()) {
                             return true;
-                        } else if (totalPowerUnblocked > dmg && sa.getHostCard() != null && sa.getHostCard().isInPlay()) {
+                        }
+                        // magic-tools rule 58: a pump spell on an unblocked attacker that adds 2+ damage is cast
+                        // when, with it, the same attack kills next turn (a two-turn clock) instead of a coin flip
+                        // (Poudlar, v8 tournament: Titan's Strength still in hand in 39 % of its losses).
+                        if (!combat.isBlocked(c) && sa.isSpell() && pumpedDmg - dmg >= 2
+                                && opp.getLife() - totalPowerUnblocked <= totalPowerUnblocked) {
+                            return true;
+                        }
+                        // magic-tools rule 161: only when the pump itself adds damage (power, double strike,
+                        // trample, infect). A keyword-only pump on a creature with an "attacking" bonus (Adanto
+                        // Vanguard, Pay 4 life: indestructible) looked like +2 damage and was paid three times.
+                        final boolean addsDamage = power > 0 || keywords.contains("Double Strike")
+                                || keywords.contains("Trample") || keywords.contains("Infect");
+                        if (addsDamage && totalPowerUnblocked > dmg && sa.getHostCard() != null && sa.getHostCard().isInPlay()) {
                             if (sa.getPayCosts().hasNoManaCost()) {
                                 return true; // always activate abilities which cost no mana and which can increase unblocked damage
                             }
@@ -1859,7 +1945,20 @@ public class ComputerUtilCard {
             }
         }
 
+        // magic-tools rule 82: a pure combat trick in hand (+N/+M, at most Trample / First Strike / Double Strike)
+        // is never precast before attackers to make a creature attack: the attack controller may still keep it home
+        // and the trick is wasted (tester 29/10 15:08, Chevalier: Boulder Rush on Venerable Knight at the beginning of
+        // combat, then no attack). It is held for after blockers (lure above) or kept for later.
+        if (combatTrick && !simAI) {
+            return false;
+        }
+
         return simAI || MyRandom.getRandom().nextFloat() < chance;
+    }
+
+    // magic-tools rule 82: the instant half of an adventure / split card (Boulder Rush) whose host card is a creature
+    private static boolean isInstantSpellState(final SpellAbility sa) {
+        return sa.isSpell() && sa.getCardState() != null && sa.getCardState().getType().isInstant();
     }
 
     /**
@@ -2170,7 +2269,12 @@ public class ComputerUtilCard {
             }
         }
 
-        if (card.hasSVar(needsToPlayName)) {
+        // magic-tools: rule 137, a karoo needs another land to return, not a basic one
+        if ("Land.Basic+YouCtrl".equals(card.getSVar(needsToPlayName)) && KarooAi.isKaroo(card)) {
+            if (!KarooAi.hasLandToReturn(card)) {
+                return AiPlayDecision.MissingNeededCards;
+            }
+        } else if (card.hasSVar(needsToPlayName)) {
             final String needsToPlay = card.getSVar(needsToPlayName);
 
             // A special case which checks that this creature will attack if it's the AI's turn

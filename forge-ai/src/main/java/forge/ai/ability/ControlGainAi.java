@@ -75,6 +75,11 @@ public class ControlGainAi extends SpellAbilityAi {
             return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
         } else {
             sa.resetTargets();
+            // magic-tools: Gilt-Leaf Archdruid targets a player, not cards
+            final AiAbilityDecision takeAll = LandStealAi.choosePlayer(ai, sa);
+            if (takeAll != null) {
+                return takeAll;
+            }
             if (sa.hasParam("TargetingPlayer")) {
                 Player targetingPlayer = AbilityUtils.getDefinedPlayers(sa.getHostCard(), sa.getParam("TargetingPlayer"), sa).get(0);
                 sa.setTargetingPlayer(targetingPlayer);
@@ -150,6 +155,10 @@ public class ControlGainAi extends SpellAbilityAi {
                     }
                 }
                 if (!found) {
+                    return false;
+                }
+                // magic-tools: no sacrifice outlet, nothing big to steal
+                if (lose.contains("EOT") && !ThreatenSacAi.worthStealingWithoutOutlet(ai, c)) {
                     return false;
                 }
             }

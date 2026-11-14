@@ -407,6 +407,41 @@ public class ComputerUtilAbility {
                     }
                 }
 
+                // magic-tools: rule 270, the removal for an opponent anthem that is on or about to turn on
+                if (ThresholdRemoval270.removalNow(ai, sa)) {
+                    p += 10;
+                }
+                // magic-tools: rule 14, an engine fed by another card in hand goes first
+                if (sa.isSpell() && EngineFirstAi.fedFromHand(ai, source)) {
+                    p += 2;
+                }
+                // magic-tools: rule 90, the "whenever you cast" boon before the spells it feeds (and the mana dorks)
+                if (CastBoonAi.worth(ai, sa)) {
+                    p += 8;
+                }
+                // magic-tools: rule 76, a lord that pumps creatures already in play goes before a bigger body
+                p += LordFirstAi.priority(ai, sa);
+                // magic-tools: rule 188, the first cast of the commander goes before the bigger spells
+                p += CommanderFirstAi.priority(ai, sa);
+                // magic-tools: rule 77, Culling Scales before a utility body when it hits an opponent's creature
+                p += CullingScalesAi.priority(ai, sa);
+                // magic-tools: rule 67, early mana dorks before the bigger spells when the rest of the mana is still used
+                if (ManaBaseFirstAi.goesFirst(ai, sa)) {
+                    p += 5;
+                }
+                // magic-tools: rule 230, Isochron Scepter and the like before the creatures that would take their mana
+                if (ImprintFirstAi.goesFirst(ai, sa)) {
+                    p += 5;
+                }
+                // magic-tools: rule 31, a second copy of a tap engine goes after the activation of the first
+                if (DuplicateEngineAi.redundant(ai, sa)) {
+                    p -= 5;
+                }
+                // magic-tools: rule 267, a permanent that repeats the effect of a one-shot spell in hand goes first
+                p += RecurringFirst267.priority(ai, sa);
+                // magic-tools: rule 272, the adventure half before its own permanent half when nothing threatens us
+                p += AdventureFirst272.priority(ai, sa);
+
                 for (StaticAbility sta : source.getStaticAbilities()) {
                     final Set<StaticAbilityMode> mode = sta.getMode();
                     // reduce cost to enable more plays
@@ -436,6 +471,9 @@ public class ComputerUtilAbility {
             if (ApiType.DestroyAll == sa.getApi()) {
                 // check boardwipe earlier
                 p += 4;
+            } else if (ManaFilterAi.isFilter(sa)) {
+                // magic-tools: a Signet is only activated for a spell that needs it, before that spell
+                p += 9;
             } else if (sa.isManaAbility()) {
                 // keep mana abilities for paying
                 p -= 9;

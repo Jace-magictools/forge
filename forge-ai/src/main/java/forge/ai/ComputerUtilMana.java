@@ -102,7 +102,7 @@ public class ComputerUtilMana {
         return new CardCollection(payment.stream().map(s -> s.getHostCard()));
     }
 
-    private static Integer scoreManaProducingCard(final Card card) {
+    private static Integer scoreManaProducingCard(final Card card, final SpellAbility paying) {
         int score = 0;
 
         for (SpellAbility ability : card.getSpellAbilities()) {
@@ -111,7 +111,9 @@ public class ComputerUtilMana {
                 score += ability.calculateScoreForManaAbility();
                 // TODO check TriggersWhenSpent: decrease score depending on context
             }
-            else if (!ability.isTrigger() && ability.isPossible()) {
+            else if (!ability.isTrigger() && ability.isPossible()
+                    // magic-tools rule 104: only when that ability can still be paid this turn
+                    && SpareSourceAi.keepsSourceFor(card, ability, paying)) {
                 score += 13; //add 13 for any non-mana activated abilities
             }
         }
@@ -138,7 +140,7 @@ public class ComputerUtilMana {
                 final Card hostCard = ability.getHostCard();
                 if (!manaCardMap.containsKey(hostCard)) {
                     // TODO +1 when reserved
-                    manaCardMap.put(hostCard, scoreManaProducingCard(hostCard));
+                    manaCardMap.put(hostCard, scoreManaProducingCard(hostCard, sa));
                     orderedCards.add(hostCard);
                 }
             }
@@ -324,6 +326,11 @@ public class ComputerUtilMana {
             }
         }
 
+        // magic-tools: rule 300, a source with bonus mana (Wild Growth, Overgrowth, Mana Flare...) first when all of it is spent
+        maList = BonusManaAi.order(ai, cost, toPay, maList);
+        // magic-tools: rule 301, the land a mana aura is cast on pays last
+        maList = ManaAura301Ai.payLast(ai, sa, maList);
+
         for (final SpellAbility ma : maList) {
             // this rarely seems like a good idea
             if (ma.getHostCard() == saHost) {
@@ -400,6 +407,18 @@ public class ComputerUtilMana {
                 continue;
             }
 
+            // magic-tools: rule 59, no real creature sacrificed for mana to pay a spell that is not clearly bigger
+            if (!ManaSacAi.worthPaying(ai, ma, sa)) {
+                continue;
+            }
+            // magic-tools: rule 196, Birchlore Rangers does not burn dorks that tap for mana on their own
+            if (TapEngineAi.wasteful(ai, ma, AiCardMemory.getMemorySet(ai, MemorySet.PAYS_TAP_COST), toPay)) {
+                continue;
+            }
+            // magic-tools: rule 206, the creatures that « tap N of the type » is about to tap do not pay
+            if (TapGoalAi.spares(ai, ma, sa)) {
+                continue;
+            }
             // these should come last since they reserve the paying cards
             // (this means if a mana ability has both parts it doesn't currently undo reservations if the second part fails)
             if (!ComputerUtilCost.checkForManaSacrificeCost(ai, ma.getPayCosts(), ma, ma.isTrigger())) {
@@ -626,6 +645,21 @@ public class ComputerUtilMana {
             StaticAbilityManaConvert.manaConvert(manapool, ai, sa.getHostCard(), effect && !sa.isCastFromPlayEffect() ? null : sa);
         }
 
+        int phyLifeToPay = 2;
+        // magic-tools rule 79: pay Phyrexian shards with life when the saved mana buys another spell or equip this turn
+        if (!cost.containsOnlyPhyrexianMana() && cost.containsPhyrexianMana()) {
+            ListMultimap<ManaCostShard, SpellAbility> early = getSourcesForShards(cost, sa, ai, test, checkPlayable, sa.getHostCard().hasConverge());
+            for (int phy = PhyrexianAi.shardsToPayForSpareMana(ai, sa, cost, early, manapool.totalMana()); phy > 0; phy--) {
+                cost.payPhyrexian();
+                if (test) {
+                    phyLifeToPay += 2;
+                } else {
+                    sa.setSpendPhyrexianMana(true);
+                    ai.payLife(2, sa, false);
+                }
+            }
+        }
+
         // not worth checking if it makes sense to not spend floating first
         if (manapool.payManaCostFromPool(cost, sa, test, manaSpentToPay)) {
             CostPayment.handleOfferings(sa, test, cost.isPaid());
@@ -633,10 +667,22 @@ public class ComputerUtilMana {
             return paymentList;
         }
 
-        int phyLifeToPay = 2;
         boolean purePhyrexian = cost.containsOnlyPhyrexianMana();
         boolean hasConverge = sa.getHostCard().hasConverge();
         ListMultimap<ManaCostShard, SpellAbility> sourcesForShards = getSourcesForShards(cost, sa, ai, test, checkPlayable, hasConverge);
+
+        // magic-tools: not enough sources for the whole cost, pay the Phyrexian shards with life first
+        if (!purePhyrexian) {
+            for (int phy = PhyrexianAi.shardsToPayWithLife(ai, sa, cost, sourcesForShards, phyLifeToPay - 2); phy > 0; phy--) {
+                cost.payPhyrexian();
+                if (test) {
+                    phyLifeToPay += 2;
+                } else {
+                    sa.setSpendPhyrexianMana(true);
+                    ai.payLife(2, sa, false);
+                }
+            }
+        }
 
         int testEnergyPool = ai.getCounters(CounterEnumType.ENERGY);
         ManaCostShard toPay = null;
@@ -940,6 +986,10 @@ public class ComputerUtilMana {
         final Card sourceCard = ma.getHostCard();
 
         if (isManaSourceReserved(ai, sourceCard)) {
+            return false;
+        }
+        // magic-tools: do not tap a creature we need as a blocker to survive the next attack
+        if (BlockerReserveAi.reservedSource(ai, ma)) {
             return false;
         }
 

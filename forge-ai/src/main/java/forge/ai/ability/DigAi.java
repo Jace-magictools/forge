@@ -5,6 +5,7 @@ import forge.ai.*;
 import forge.game.Game;
 import forge.game.GameEntity;
 import forge.game.ability.AbilityUtils;
+import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
 import forge.game.card.CardLists;
@@ -53,6 +54,12 @@ public class DigAi extends SpellAbilityAi {
             }
         }
 
+        // magic-tools: the rest goes back to the library, but what is taken can still empty it
+        // (Lead the Stampede with 3 creatures left: ElfBall lost at its next draw step)
+        if (libraryOwner == ai && digCanEmptyOwnLibrary(ai, sa)) {
+            return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+        }
+
         // Don't use draw abilities before main 2 if possible
         if (game.getPhaseHandler().getPhase().isBefore(PhaseType.MAIN2) && !sa.hasParam("ActivationPhases")
                 && !sa.hasParam("DestinationZone") && !ComputerUtil.castSpellInMain1(ai, sa)) {
@@ -98,8 +105,39 @@ public class DigAi extends SpellAbilityAi {
         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
     }
 
+    // magic-tools: "look at the top N, take any number" whose taken cards could leave no card for the next draw step
+    static boolean digCanEmptyOwnLibrary(final Player ai, final SpellAbility sa) {
+        if ("Library".equals(sa.getParamOrDefault("DestinationZone", "Hand")) || ai.isCardInPlay("Laboratory Maniac")) {
+            return false;
+        }
+        final String digNum = sa.getParam("DigNum");
+        if (digNum == null || digNum.startsWith("X")) {
+            return false;
+        }
+        final Card host = sa.getHostCard();
+        final int numToDig = AbilityUtils.calculateAmount(host, digNum, sa);
+        final String changeNum = sa.getParamOrDefault("ChangeNum", "1");
+        final int maxTaken = "Any".equals(changeNum) || "All".equals(changeNum) ? numToDig
+                : Math.min(numToDig, AbilityUtils.calculateAmount(host, changeNum, sa));
+        return maxTaken > 0 && ai.getCardsIn(ZoneType.Library).size() <= maxTaken;
+    }
+
     @Override
     public AiAbilityDecision chkDrawback(Player aiPlayer, SpellAbility sa) {
+        // magic-tools: rule 166, the price of a mana ability ("{T}: add {W}, {G} or {R}, exile the bottom three cards of
+        // your library", Port des Havres Gris): canPlay refused it at instant speed with more than one card in hand,
+        // so the land was never activated and the AI cast nothing (plateau, Uruk, 04/11; CR 605.1a makes it a
+        // stack ability, activated beforehand by ManaFilterAi). Only the "don't deck yourself" guard is kept.
+        if (sa.getRootAbility().getApi() == ApiType.Mana && !sa.usesTargeting()
+                && "You".equals(sa.getParamOrDefault("Defined", "You"))) {
+            final String digNum = sa.getParamOrDefault("DigNum", "1");
+            final int numToDig = digNum.matches("\\d+") ? Integer.parseInt(digNum)
+                    : AbilityUtils.calculateAmount(sa.getHostCard(), digNum, sa);
+            if (aiPlayer.getCardsIn(ZoneType.Library).size() <= numToDig + 2 && !aiPlayer.isCardInPlay("Laboratory Maniac")) {
+                return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
+            }
+            return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+        }
         // TODO: improve this check in ways that may be specific to a subability
         return canPlay(aiPlayer, sa);
     }
@@ -136,6 +174,16 @@ public class DigAi extends SpellAbilityAi {
     
     @Override
     public Card chooseSingleCard(Player ai, SpellAbility sa, Iterable<Card> valid, boolean isOptional, Player relatedPlayer, Map<String, Object> params) {
+        // magic-tools: rule 135, digging a card onto our battlefield never picks a second copy of a legend
+        // we already control when another choice exists (tournament v20, Pod: Birthing Ritual put a second
+        // Melira, Sylvok Outcast onto the battlefield, the legend rule sent one to the graveyard)
+        if ("Battlefield".equals(sa.getParam("DestinationZone")) && sa.getActivatingPlayer() == ai) {
+            CardCollection noDupLegend = CardLists.filter(valid,
+                    c -> !c.getType().isLegendary() || c.ignoreLegendRule() || !ai.isCardInPlay(c.getName()));
+            if (!noDupLegend.isEmpty()) {
+                valid = noDupLegend;
+            }
+        }
         if ("DigForCreature".equals(sa.getParam("AILogic"))) {
             Card bestChoice = ComputerUtilCard.getBestCreatureAI(valid);
             if (bestChoice == null) {

@@ -18,6 +18,7 @@
 package forge.ai.ability;
 
 import forge.ai.ComputerUtilCard;
+import forge.ai.PersistLoopAi;
 import forge.ai.SpellAbilityAi;
 import forge.game.card.*;
 import forge.game.keyword.Keyword;
@@ -94,6 +95,11 @@ public abstract class CountersAi extends SpellAbilityAi {
         }
 
         if (counterType.is(CounterEnumType.P1P1)) {
+            // magic-tools (rule 208): a persist creature with its -1/-1 counter first, the two cancel
+            final Card reload = PersistLoopAi.reloadTarget(list);
+            if (reload != null) {
+                return reload;
+            }
             // TODO look for modified
             choice = ComputerUtilCard.getBestCreatureAI(list);
 

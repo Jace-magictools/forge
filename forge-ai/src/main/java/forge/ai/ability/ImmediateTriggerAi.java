@@ -24,7 +24,14 @@ public class ImmediateTriggerAi extends SpellAbilityAi {
         trigsa.setActivatingPlayer(ai);
 
         if (trigsa instanceof AbilitySub) {
-            return SpellApiToAi.Converter.get(trigsa).chkDrawbackWithSubs(ai, (AbilitySub)trigsa);
+            AiAbilityDecision d = SpellApiToAi.Converter.get(trigsa).chkDrawbackWithSubs(ai, (AbilitySub)trigsa);
+            // magic-tools: rule 133, a reflexive "when you do" trigger that can only hit the opponent's side is a bonus:
+            // judged before resolution (X = the amassed Army's power is still 0) it must not veto the spell
+            // (Foray of Orcs was never cast, tournament v19, Sauron)
+            if (!d.willingToPlay() && opponentOnly(trigsa)) {
+                return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
+            }
+            return d;
         }
 
         AiPlayDecision decision = ((PlayerControllerAi)ai.getController()).getAi().canPlaySa(trigsa);
@@ -88,4 +95,25 @@ public class ImmediateTriggerAi extends SpellAbilityAi {
         return ((PlayerControllerAi)ai.getController()).getAi().canPlaySa(trigsa) == AiPlayDecision.WillPlay ? new AiAbilityDecision(100, AiPlayDecision.WillPlay) : new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
     }
 
+
+    // magic-tools: rule 133, every target of the reflexive trigger (and of its subs) is on the opponent's side
+    private static boolean opponentOnly(SpellAbility trigsa) {
+        boolean targets = false;
+        for (SpellAbility a = trigsa; a != null; a = a.getSubAbility()) {
+            if (!a.usesTargeting()) {
+                if (a.getApi() != null && a.getApi() != forge.game.ability.ApiType.Cleanup) {
+                    return false;
+                }
+                continue;
+            }
+            targets = true;
+            String v = a.getParamOrDefault("ValidTgts", "");
+            for (String part : v.split(",")) {
+                if (!(part.contains("OppCtrl") || part.equals("Opponent") || part.contains("OppOwn"))) {
+                    return false;
+                }
+            }
+        }
+        return targets;
+    }
 }

@@ -70,7 +70,8 @@ public class CountersPutAllAi extends SpellAbilityAi {
         if (curse) {
             if (type.equals("M1M1")) {
                 final List<Card> killable = CardLists.filter(hList, c -> c.getNetToughness() <= amount);
-                if (killable.size() <= 2) {
+                // magic-tools: rule 176, weighed on both sides with our -1/-1 payoffs (Soul Snuffers, Nest of Scarabs)
+                if (killable.size() <= 2 && !forge.ai.MassMinusCounterAi.worthIt(ai, cList, hList, amount)) {
                     return new AiAbilityDecision(0, AiPlayDecision.CantPlayAi);
                 }
             } else {

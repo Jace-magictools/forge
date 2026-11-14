@@ -180,6 +180,10 @@ public class AiAttackController {
     }
 
     private boolean canAttackWrapper(final Card attacker, final GameEntity defender) {
+        // magic-tools: rule 146, a land untapper that is the missing mana of a cost stays home (Krosan Restorer)
+        if (!nextTurn && UntapManaAi.keepHome(ai, attacker)) {
+            return false;
+        }
         if (nextTurn) {
             return CombatUtil.canAttackNextTurn(attacker, defender);
         }
@@ -201,11 +205,11 @@ public class AiAttackController {
 
         Map<Player, Integer> threatScores = Maps.newHashMap();
         for (Player opp : opponents) {
-            final int life = opp.getLife();
+            // magic-tools: rule 162, commander damage counts as life (an opponent 5 commander damage from death is at 5)
+            final int life = Math.min(opp.getLife(), CommanderDamageAttackAi.remaining(ai, opp));
             int score = ComputerUtil.evaluateBoardPosition(ai, opp);
             int lowLifeThreshold = Math.min(20, opp.getStartingLife());
             if (life > 0 && life < lowLifeThreshold) {
-                // TODO commander damage
                 int lifeDeficit = lowLifeThreshold - life;
                 score += lifeDeficit * lifeDeficit;
             }
@@ -314,8 +318,62 @@ public class AiAttackController {
         return false;
     }
 
+    /**
+     * magic-tools: rule 112. True when the attacker brings nothing by itself: no damage, no poison, no attack effect,
+     * and its own attack triggers only pump the other attackers (battle cry, "each other attacking creature").
+     */
+    public static boolean onlySupportsOtherAttackers(final Player ai, final Card attacker, final Combat combat) {
+        final GameEntity defender = combat.getDefenderByAttacker(attacker);
+        if (defender == null || "TRUE".equals(attacker.getSVar("HasAttackEffect"))
+                || attacker.hasKeyword(Keyword.ANNIHILATOR) || countExaltedBonus(ai) > 0) {
+            return false;
+        }
+        if (ComputerUtilCombat.damageIfUnblocked(attacker, defender, combat, false) > 0) {
+            return false;
+        }
+        if (defender instanceof Player player && ComputerUtilCombat.poisonIfUnblocked(attacker, player) > 0) {
+            return false;
+        }
+        // its own attack triggers must all be "other attackers" pumps, and there must be one
+        boolean support = false;
+        for (final Trigger trigger : attacker.getTriggers()) {
+            if (trigger.getMode() != TriggerType.Attacks) {
+                continue;
+            }
+            if (!isOtherAttackersPump(trigger.ensureAbility())) {
+                return false;
+            }
+            support = true;
+        }
+        if (!support) {
+            return false;
+        }
+        // nothing else on our side cares about this attack
+        final List<Card> alone = Lists.newArrayList(attacker);
+        for (final Card c : ai.getCardsIn(ZoneType.STATIC_ABILITIES_SOURCE_ZONES)) {
+            for (final Trigger trigger : c.getTriggers()) {
+                if ((c != attacker || trigger.getMode() != TriggerType.Attacks)
+                        && ComputerUtilCombat.combatTriggerWillTrigger(attacker, null, trigger, combat, alone)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean isOtherAttackersPump(final SpellAbility sa) {
+        if (sa == null || sa.getSubAbility() != null
+                || (sa.getApi() != ApiType.PumpAll && sa.getApi() != ApiType.PutCounterAll)) {
+            return false;
+        }
+        final String valid = sa.getParamOrDefault("ValidCards", "");
+        return valid.contains("attacking") && valid.contains("Other");
+    }
+
     public final static List<Card> getPossibleBlockers(final List<Card> blockers, final List<Card> attackers, final boolean nextTurn) {
-        return CardLists.filter(blockers, c -> canBlockAnAttacker(c, attackers, nextTurn));
+        // magic-tools: rule 303 (D171), restricted blockers ("can't block alone", "unless two others block")
+        return BlockAlone303Ai.filter(CardLists.filter(blockers, c -> canBlockAnAttacker(c, attackers, nextTurn)),
+                attackers.isEmpty() ? null : attackers.get(0).getController());
     }
 
     public final static boolean canBlockAnAttacker(final Card c, final List<Card> attackers, final boolean nextTurn) {
@@ -335,6 +393,17 @@ public class AiAttackController {
         return null;
     }
 
+    // magic-tools rule 311 (D175): the life our attackers give back (lifelink, "when attacks, gain N") counts
+    // before deciding we must hold them back as blockers
+    private int baselineLife311(final boolean playAggro, final boolean pilotsNonAggroDeck, final CardCollection free) {
+        final int gain = LifelinkAttack311.gain(ai, free);
+        int life = ComputerUtil.predictNextCombatsRemainingLife(ai, playAggro, pilotsNonAggroDeck, -gain, free);
+        if (gain > 0 && life != Integer.MIN_VALUE && life != Integer.MAX_VALUE) {
+            life += gain;
+        }
+        return life;
+    }
+
     // this checks to make sure that the computer player doesn't lose when the human player attacks
     public final List<Card> notNeededAsBlockers(final List<Card> currentAttackers, final List<Card> potentialAttackers) {
         // check for time walks
@@ -352,6 +421,11 @@ public class AiAttackController {
                 }
             }
             potentialAttackers.removeAll(toRemove);
+            return potentialAttackers;
+        }
+
+        // magic-tools rule 257: holding back defends nothing when the unblockable attackers are already lethal
+        if (DoomedAttack257.doomed(ai)) {
             return potentialAttackers;
         }
 
@@ -395,14 +469,15 @@ public class AiAttackController {
             boolean pilotsNonAggroDeck = false;
             if (ai.getController().isAI()) {
                 PlayerControllerAi aic = ((PlayerControllerAi) ai.getController());
-                pilotsNonAggroDeck = aic.pilotsNonAggroDeck();
+                // magic-tools rule 282: Forge never sets pilotsNonAggroDeck; the deck plan's route does (combo, reach)
+                pilotsNonAggroDeck = aic.pilotsNonAggroDeck() || (NewAi.on(ai, 282) && DeckPlanAi.nonAggroRoute(ai));
                 playAggro = !pilotsNonAggroDeck || aic.getAi().getBoolProperty(AiProps.PLAY_AGGRO);
             }
             // TODO make switchable via AI property
             int thresholdMod = 0;
             int lastAcceptableBaselineLife = 0;
             if (pilotsNonAggroDeck) {
-                lastAcceptableBaselineLife = ComputerUtil.predictNextCombatsRemainingLife(ai, playAggro, pilotsNonAggroDeck, 0, notNeededAsBlockers);
+                lastAcceptableBaselineLife = baselineLife311(playAggro, pilotsNonAggroDeck, notNeededAsBlockers);
                 if (!ai.isCardInPlay("Laboratory Maniac")) {
                     // AI is getting milled out
                     thresholdMod += 3 - Math.min(ai.getCardsIn(ZoneType.Library).size(), 3);
@@ -421,7 +496,7 @@ public class AiAttackController {
                     continue;
                 }
                 notNeededAsBlockers.add(c);
-                int currentBaselineLife = ComputerUtil.predictNextCombatsRemainingLife(ai, playAggro, pilotsNonAggroDeck, 0, notNeededAsBlockers);
+                int currentBaselineLife = baselineLife311(playAggro, pilotsNonAggroDeck, notNeededAsBlockers);
                 // AI doesn't know from what it will lose, so it might still keep an unnecessary blocker back sometimes
                 if (currentBaselineLife == Integer.MIN_VALUE) {
                     notNeededAsBlockers.remove(c);
@@ -437,7 +512,7 @@ public class AiAttackController {
                     } else {
                         ownAttackerDmg += ComputerUtilCombat.predictPowerBonusOfAttacker(c, null, null, true);
                     }
-                    if (c.hasDoubleStrike()) {
+                    if (AttackStrike255.hasDoubleStrike(c)) {
                         ownAttackerDmg *= 2;
                     }
                     ownAttackerDmg += thresholdMod;
@@ -574,6 +649,44 @@ public class AiAttackController {
         }
     }
 
+    // magic-tools: rule 52, lethal attack on the table (read before main 1 spells tap the attackers for mana)
+    public final boolean isLethalAssault() {
+        return !this.attackers.isEmpty() && (doAssault() || retargetLethalOpponent());
+    }
+
+    // magic-tools: rule 163, at a table of 3-4 the defender came from a threat score (board, life, initiative) and the
+    // kill check only looked at that player: an opponent at 6 with one blocker survived while the AI hit a healthier one.
+    // When the chosen opponent can't be killed, try the others with the same assault check; keep the first one that dies.
+    private boolean retargetLethalOpponent() {
+        final PlayerCollection opps = ai.getOpponents();
+        if (opps.size() < 2 || nextTurn) {
+            return false;
+        }
+        final Player chosen = defendingOpponent;
+        for (final Player opp : opps) {
+            if (opp == chosen || opp.hasLost()) {
+                continue;
+            }
+            defendingOpponent = opp;
+            refreshCombatants(opp);
+            if (!this.attackers.isEmpty() && doAssault()) {
+                return true;
+            }
+        }
+        defendingOpponent = chosen;
+        refreshCombatants(chosen);
+        return false;
+    }
+
+    // magic-tools rule 304: same deck profile as notNeededAsBlockers (Forge flag or rule 282 deck plan route)
+    private boolean pilotsNonAggroDeck304() {
+        if (!ai.getController().isAI()) {
+            return false;
+        }
+        final PlayerControllerAi aic = (PlayerControllerAi) ai.getController();
+        return aic.pilotsNonAggroDeck() || (NewAi.on(ai, 282) && DeckPlanAi.nonAggroRoute(ai));
+    }
+
     private boolean doAssault() {
         if (ai.cantWin()) {
             return false;
@@ -595,6 +708,11 @@ public class AiAttackController {
         // - therefore in the few cases AI runs this for others conclusions might be wrong
         if (ComputerUtil.hasAFogEffect(defendingOpponent, ai, true)) {
             return false;
+        }
+
+        // magic-tools: rule 153, one death drains the opponent out: any attack wins (puzzle MT32)
+        if (DeathDrainAttackAi.lethal(ai, defendingOpponent, this.attackers, this.blockers)) {
+            return true;
         }
 
         CardLists.sortByPowerDesc(this.attackers);
@@ -730,6 +848,11 @@ public class AiAttackController {
             }
         }
 
+        // magic-tools: rule 162, an unblocked commander finishing the opponent with commander damage is lethal too
+        if (CommanderDamageAttackAi.lethal(defendingOpponent, unblockedAttackers, trampleDmg)) {
+            return true;
+        }
+
         if (defendingOpponent.getLife() > 0 && !defendingOpponent.cantLoseForZeroOrLessLife()) {
             int totalCombatDamage = tramplers.stream().map(c -> trampleDmg.getOrDefault(c, 0)).reduce(0, Integer::sum);
             if (totalCombatDamage >= defendingOpponent.getLife()) {
@@ -795,7 +918,8 @@ public class AiAttackController {
         return prefDefender;
     }
 
-    final boolean LOG_AI_ATTACKS = false;
+    // Diagnostic local (Magic Tools) : FORGE_ATTACK_TRACE=1 affiche les raisons de chaque attaque de l IA.
+    final boolean LOG_AI_ATTACKS = System.getenv("FORGE_ATTACK_TRACE") != null;
 
     /**
      * <p>
@@ -814,7 +938,7 @@ public class AiAttackController {
         }
 
         // TODO ideally requirements and attackMax are calculated first. so AI knows which attackers can't contribute
-        final boolean bAssault = doAssault();
+        final boolean bAssault = doAssault() || retargetLethalOpponent();
 
         // Determine who will be attacked
         GameEntity defender = chooseDefender(combat, bAssault);
@@ -894,6 +1018,9 @@ public class AiAttackController {
                 tasks.add(() -> {
                     GameEntity mustAttackDef = null;
                     if (attacker.getSVar("MustAttack").equals("True")) {
+                        mustAttackDef = finalDefender;
+                    } else if (NewAi.on(ai, 287) && EndStepPenaltyAi.mustAttack(attacker)) {
+                        // magic-tools rule 287 (D168): hurts its controller at end step if it stays home
                         mustAttackDef = finalDefender;
                     } else if (attacker.hasSVar("EndOfTurnLeavePlay")
                             && isEffectiveAttacker(ai, attacker, combat, finalDefender)) {
@@ -1238,6 +1365,8 @@ public class AiAttackController {
         // TODO replace with nice descriptive variable names
         if (ratioDiff > 0 && doAttritionalAttack) {
             aiAggression = 5; // attack at all costs
+        } else if (DoomedAttack257.doomed(ai)) {
+            aiAggression = 5; // magic-tools rule 257: dead next turn whatever we block, attack all out
         } else if ((ratioDiff >= 1 && this.attackers.size() > 1 && (humanLifeToDamageRatio < 2 || outNumber > 0))
                 || (playAggro && MyRandom.percentTrue(chanceToAttackToTrade) && humanLifeToDamageRatio > 1)) {
             aiAggression = 4; // attack expecting to trade or damage player.
@@ -1273,7 +1402,7 @@ public class AiAttackController {
         } // stay at home to block
 
         if ( LOG_AI_ATTACKS )
-            System.out.println(aiAggression + " = ai aggression");
+            System.out.println("@ATK " + ai.getName() + " t" + ai.getGame().getPhaseHandler().getTurn() + " " + aiAggression + " = ai aggression ratioDiff=" + ratioDiff + " attrit=" + doAttritionalAttack);
 
         // ****************
         // Evaluation the end
@@ -1292,11 +1421,18 @@ public class AiAttackController {
         FCollection<GameEntity> possibleDefenders = new FCollection<>(defendingOpponent);
         possibleDefenders.addAll(defendingOpponent.getPlaneswalkersInPlay());
 
+        // magic-tools rule 304: clear power edge, life race won, more attackers than blockers able to kill one: all go
+        final java.util.Set<Card> press304 = aiAggression < 5
+                ? ForceRace304Ai.press(ai, defendingOpponent, left, this.blockers, combat, pilotsNonAggroDeck304())
+                : new java.util.HashSet<>();
+        if (LOG_AI_ATTACKS && !press304.isEmpty())
+            System.out.println("rule 304 press = " + press304);
+
         while (!left.isEmpty()) {
             CardCollection attackersAssigned = new CardCollection();
             for (int i = 0; i < left.size(); i++) {
                 final Card attacker = left.get(i);
-                if (aiAggression < 5 && !attacker.hasFirstStrike() && !attacker.hasDoubleStrike()
+                if (aiAggression < 5 && !AttackStrike255.hasFirstStrike(attacker)
                         && ComputerUtilCombat.getTotalFirstStrikeBlockPower(attacker, defendingOpponent)
                         >= ComputerUtilCombat.getDamageToKill(attacker, false)) {
                     continue;
@@ -1304,7 +1440,7 @@ public class AiAttackController {
 
                 // TODO logic for Questing Beast to prefer players
 
-                if (shouldAttack(attacker, this.blockers, combat, defender) && canAttackWrapper(attacker, defender)) {
+                if ((press304.contains(attacker) && defender == defendingOpponent || shouldAttack(attacker, this.blockers, combat, defender)) && canAttackWrapper(attacker, defender)) {
                     combat.addAttacker(attacker, defender);
                     attackersAssigned.add(attacker);
 
@@ -1498,6 +1634,12 @@ public class AiAttackController {
         SpellAbilityFactors saf = new SpellAbilityFactors(attacker);
         if (aiAggression != 5) {
             saf.calculate(defenders, combat);
+            // magic-tools: rule 197, a card-drawing engine with fuel in hand does not risk itself (ElfBall, tester 03/11)
+            if (EngineHomeAi.keepHome(ai, attacker, defenders, combat, defender instanceof Player ? (Player) defender : null)) {
+                if (LOG_AI_ATTACKS)
+                    System.out.println(attacker.getName() + " = staying home, draws cards with what is in hand (rule 197)");
+                return false;
+            }
         }
 
         // if the creature cannot block and can kill all opponents they might as
@@ -1510,6 +1652,60 @@ public class AiAttackController {
         if (!saf.canBeKilled && !saf.dangerousBlockersPresent && saf.canTrampleOverDefenders) {
             if (LOG_AI_ATTACKS)
                 System.out.println(attacker.getName() + " = expecting to survive and get some Trample damage through");
+            return true;
+        }
+
+        // magic-tools: rule 214, the only blockers that could kill this creature would die of the damage it sends back
+        if (aiAggression > 0 && aiAggression != 5 && defender instanceof Player
+                && DamageReflectAi.killersWouldDie(ai, attacker, defenders, combat, (Player) defender)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, its killers would die of the damage sent back (rule 214)");
+            return true;
+        }
+
+        // magic-tools: rule 154, a token whose death drains the opponent loses nothing by attacking (Plateau 02/11)
+        if (aiAggression > 0 && DeathDrainAttackAi.freeAttacker(ai, defender, attacker)) {
+            return true;
+        }
+
+        // magic-tools: rule 155, a creature whose own death deals damage loses nothing in a trade (Plateau 02/11)
+        if (aiAggression > 0 && aiAggression != 5 && saf.numberOfPossibleBlockers > 0
+                && DeathDrainAttackAi.deathPaysAttacker(ai, defender, attacker, saf.canKillAll, saf.canBeKilledByOne, aiAggression)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, its death pays (rule 155)");
+            return true;
+        }
+
+        // magic-tools: rule 156, small creatures that cannot block anything outnumber the opponent's blockers (banc 03/11)
+        if (aiAggression > 0 && aiAggression != 5 && SwarmAttackAi.swarmAttacker(ai, defender, attacker, this.attackers)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, useless as a blocker and the swarm outnumbers the blockers (rule 156)");
+            return true;
+        }
+
+        // magic-tools: rule 183, nothing the opponent has can kill it: the attack is free (Acoucheur d'Uruk vs Sam, D105)
+        if (aiAggression > 0 && aiAggression != 5
+                && FreeAttackAi.freeAttacker(ai, attacker, defenders, combat, saf.canBeKilled, saf.canBeKilledByOne)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, no block can kill it (rule 183)");
+            return true;
+        }
+
+        // magic-tools: rule 260 (D147 point 2), its attack trigger takes back a permanent of ours the opponent controls
+        // (Phelia, Exuberant Shepherd against Control Magic): worth the attacker even if it dies in the combat
+        // (also on defence: the stolen creature comes back untapped at the end step, one blocker more, one attacker less)
+        if (aiAggression != 5 && ReclaimAttack260.worthTheRisk(ai, attacker)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, its trigger takes back a stolen permanent (rule 260)");
+            return true;
+        }
+
+        // magic-tools: rule 255 (D145), a vigilant attacker costs nothing on defence: at worst it trades with a blocker
+        // worth at least as much (Alpine Watchdog with Blade Historian's double strike against Archon of Sun's Grace)
+        if (aiAggression > 0 && aiAggression != 5 && saf.numberOfPossibleBlockers > 0
+                && AttackStrike255.vigilantTrade(attacker, saf.canKillAll, saf.isWorthLessThanAllKillers)) {
+            if (LOG_AI_ATTACKS)
+                System.out.println(attacker.getName() + " = attacking, vigilant and at worst trades up (rule 255)");
             return true;
         }
 
