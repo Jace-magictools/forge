@@ -1,0 +1,9 @@
+Name:Death Is Irrelevant
+ManaCost:6 B B
+Types:Enchantment
+S:Mode$ Continuous | Affected$ Creature.Artifact+YouCtrl | AddKeyword$ Indestructible | Description$ Artifact creatures you control have indestructible.
+T:Mode$ Phase | Phase$ End of Turn | ValidPlayer$ You | TriggerZones$ Battlefield | Execute$ TrigAssimilate | TriggerDescription$ At the beginning of your end step, assimilate target creature card from a graveyard. (Put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)
+SVar:TrigAssimilate:DB$ ChangeZone | ValidTgts$ Creature | TgtZone$ Graveyard | ValidTgtsDesc$ creature card in a graveyard | Origin$ Graveyard | Destination$ Battlefield | GainControl$ True | WithCountersType$ P1P1 | RememberChanged$ True | SubAbility$ DBAnimate
+SVar:DBAnimate:DB$ Animate | Defined$ Remembered | Types$ Artifact,Creature,Borg | RemoveCreatureTypes$ True | Duration$ Permanent | SubAbility$ DBCleanup
+SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True
+Oracle:Artifact creatures you control have indestructible.\nAt the beginning of your end step, assimilate target creature card from a graveyard. (Put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)

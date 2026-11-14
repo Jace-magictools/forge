@@ -1,0 +1,9 @@
+Name:Gift of Perfection
+ManaCost:4 U
+Types:Sorcery
+A:SP$ DigUntil | Defined$ Player.Opponent | Valid$ Creature | ValidDescription$ creature card | FoundDestination$ Exile | RevealedDestination$ Library | RevealedLibraryPosition$ -1 | RevealRandomOrder$ True | RememberFound$ True | SubAbility$ DBAssimilate | SpellDescription$ Each opponent reveals cards from the top of their library until they reveal a creature card. Assimilate one of the creature cards revealed this way. Then each opponent puts the other cards they revealed this way on the bottom of their library in a random order. (To assimilate a card, put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)
+SVar:DBAssimilate:DB$ ChangeZone | Hidden$ True | Origin$ Exile | Destination$ Battlefield | ChangeType$ Card.IsRemembered | ChangeNum$ 1 | Chooser$ You | GainControl$ True | WithCountersType$ P1P1 | SubAbility$ DBAnimate
+SVar:DBAnimate:DB$ Animate | Defined$ Valid Card.IsRemembered | Types$ Artifact,Creature,Borg | RemoveCreatureTypes$ True | Duration$ Permanent | SubAbility$ DBOthers
+SVar:DBOthers:DB$ ChangeZone | Origin$ Exile | Destination$ Library | LibraryPosition$ -1 | Defined$ Remembered | RandomOrder$ True | SubAbility$ DBCleanup
+SVar:DBCleanup:DB$ Cleanup | ClearRemembered$ True
+Oracle:Each opponent reveals cards from the top of their library until they reveal a creature card. Assimilate one of the creature cards revealed this way. Then each opponent puts the other cards they revealed this way on the bottom of their library in a random order. (To assimilate a card, put it onto the battlefield under your control with a +1/+1 counter. It's a Borg artifact creature and loses all other creature types.)
