@@ -66,7 +66,7 @@ public final class AttackUnlockAi {
             return false;
         }
         final String effect = c.getSVar(t.getParam("Execute"));
-        return effect.contains("PutCounter") && effect.contains("CounterType$ Stun");
+        return effect.contains("PutCounter") && effect.toLowerCase(java.util.Locale.ROOT).contains("countertype$ stun");
     }
 
     /** The condition holds now (the limit applies) and no longer holds with the spell on our battlefield. */

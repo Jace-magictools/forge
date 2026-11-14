@@ -184,10 +184,10 @@ public enum AiProps {
     /** off, auto (read the deck) or one of aggro, burn, control, combo, ramp, midrange. */
     FLAT_MC_DECK_PLAN("auto"),
     /** Mulligan and bottom cards by the deck plan (see OpeningHand); also part of maximum strength. */
-    FLAT_MC_MULLIGAN("true"),
+    FLAT_MC_MULLIGAN("false"),
     FLAT_MC_LAND_CHOICE("true"),
     /** Plan the next land drops against the colours and costs of the hand and the commander (see LandPlanner). */
-    LAND_PLANNER("true"),
+    LAND_PLANNER("false"),
     FLAT_MC_REACTIVE("true"),
     SHORTCUT_MIN_CREATURES("10");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting

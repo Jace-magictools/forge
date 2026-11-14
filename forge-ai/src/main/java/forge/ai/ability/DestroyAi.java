@@ -322,10 +322,12 @@ public class DestroyAi extends SpellAbilityAi {
         return new AiAbilityDecision(100, AiPlayDecision.WillPlay);
     }
 
-    /** magic-tools: rule 131, a sub-ability that only happens if we controlled the destroyed card (RememberedLKI + YouCtrl). */
+    /** magic-tools: rule 131, a sub-ability that only happens if we controlled the destroyed card (RememberedLKI or Targeted, + YouCtrl). */
     static boolean rewardsOwnTarget(final SpellAbility sa) {
         for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
-            if ("RememberedLKI".equals(sub.getParam("ConditionDefined"))
+            // 2.0.16 writes some of these with the target itself (Gleeful Demolition: ConditionDefined$ Targeted)
+            final String defined = sub.getParam("ConditionDefined");
+            if (("RememberedLKI".equals(defined) || "Targeted".equals(defined))
                     && sub.getParamOrDefault("ConditionPresent", "").contains("YouCtrl")
                     && !sub.hasParam("ConditionCompare")) {
                 return true;

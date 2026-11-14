@@ -852,6 +852,13 @@ public class ComputerUtilMana {
                     saExcludeList.add(saPayment);
                     continue;
                 }
+                // magic-tools: 2.0.16 port, the test payment adds the ability's own cost but never backtracks; a costed
+                // source the other sources cannot feed (Castle Garenbrig's six {G} with two Forests) would make the
+                // whole spell look unaffordable, so it is left out when its cost and the rest exceed what remains
+                if (test && NewAi.on(ai, 316) && !costedSourceFed(ai, saPayment, manaCostToActivate, cost, sourcesForShards)) {
+                    saExcludeList.add(saPayment);
+                    continue;
+                }
                 // A Signet-like source is about to be activated: float the mana for its own cost first,
                 // from a source the remaining cost can spare, so that its cost payment doesn't grab a
                 // land that's needed for a colored shard.
@@ -2196,6 +2203,28 @@ public class ComputerUtilMana {
     /**
      * Amount of mana that has to be paid to activate a mana ability.
      */
+    /**
+     * magic-tools: 2.0.16 port. Whether the other sources still available can pay a costed mana ability's activation
+     * and what of the cost it leaves unpaid. Counts one mana per remaining source card, colours ignored: an upper bound,
+     * so it only rules out a source that cannot work.
+     */
+    private static boolean costedSourceFed(final Player ai, final SpellAbility ma, final int toActivate,
+            final ManaCostBeingPaid cost, final Multimap<ManaCostShard, SpellAbility> sourcesForShards) {
+        if (sourcesForShards == null) {
+            return false;
+        }
+        final Card host = ma.getHostCard();
+        final java.util.Set<Card> others = new java.util.HashSet<>();
+        for (final SpellAbility other : sourcesForShards.values()) {
+            if (other.getHostCard() != host) {
+                others.add(other.getHostCard());
+            }
+        }
+        final int produced = ma.hasParam("Amount") ? Math.max(1, AbilityUtils.calculateAmount(host, ma.getParam("Amount"), ma)) : 1;
+        final int left = Math.max(0, cost.getConvertedManaCost() - produced);
+        return others.size() + ai.getManaPool().totalMana() >= toActivate + left;
+    }
+
     private static int getManaToActivate(final SpellAbility ma) {
         final ManaCost manaCost = getManaCostToActivate(ma);
         return manaCost == null ? 0 : manaCost.getCMC();
