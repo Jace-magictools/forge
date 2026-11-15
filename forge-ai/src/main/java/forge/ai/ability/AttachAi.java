@@ -900,6 +900,8 @@ public class AttachAi extends SpellAbilityAi {
                 CardPredicates.isEnchantedBy(attachSource.getName()).negate()
             );
         }
+        // magic-tools rule 317 (D197): no second "becomes 0/2, loses all abilities" aura on the same creature
+        prefList = forge.ai.RedundantAura317Ai.filter(ai, attachSource, prefList);
 
         // If this is already attached and there's a sac cost, make sure we attach to something that's
         // seriously better than whatever the attachment is currently attached to (e.g. Bound by Moonsilver)
