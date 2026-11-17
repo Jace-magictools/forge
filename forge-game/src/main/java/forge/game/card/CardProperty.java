@@ -1774,6 +1774,14 @@ public class CardProperty {
                 return false;
             }
             return card.getCastSA().isDash();
+        } else if (property.equals("emerged")) {
+            if (card.getCastSA() == null) {
+                return false;
+            }
+            if (AbilityUtils.isUnlinkedFromCastSA(spellAbility, card)) {
+                return false;
+            }
+            return card.getCastSA().isEmerge();
         } else if (property.equals("escaped")) {
             if (card.getCastSA() == null) {
                 return false;
