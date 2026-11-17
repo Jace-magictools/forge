@@ -490,6 +490,10 @@ public class AiController {
                 evokeUseful = true;
             }
         }
+        // magic-tools: rule 318, a "when you cast this spell" trigger also pays for the evoke (Nulldrifter)
+        if (evoked && !evokeUseful && EvokeCastTrigger318.usefulCastTrigger(this, activator, card)) {
+            evokeUseful = true;
+        }
         if (evoked && !evokeUseful) {
             return false;
         }
