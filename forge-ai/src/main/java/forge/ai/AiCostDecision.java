@@ -513,6 +513,13 @@ public class AiCostDecision extends CostDecisionMakerBase {
 
         int c = cost.getAbilityAmount(ability);
 
+        // magic-tools: rule 321, the outlet activated in response takes the creature the opponent's spell removes
+        final Card doomed = SacInResponseAi.chosenFor(ability);
+        if (doomed != null && c == 1 && doomed.isInPlay()) {
+            SacInResponseAi.clear(ability);
+            return PaymentDecision.card(doomed);
+        }
+
         final AiController aic = ((PlayerControllerAi)player.getController()).getAi();
         CardCollectionView list = aic.chooseSacrificeType(cost.getType(), ability, isEffect(), c, null);
         return list == null ? null : PaymentDecision.card(list);

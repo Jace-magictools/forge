@@ -2284,6 +2284,14 @@ public class AiController {
                 return counterETB;
         }
 
+        // magic-tools: rule 321, a creature the opponent's spell takes anyway is sacrificed first to an outlet
+        if (!topOwnedByAI && top != null) {
+            final SpellAbility sacResponse = SacInResponseAi.response(player);
+            if (sacResponse != null) {
+                return sacResponse;
+            }
+        }
+
         // magic-tools: rule 52, lethal on the table in main 1: go to combat first, the spells wait for main 2
         // (ElfBall tapped its pumped elves for mana in main 1 and never attacked for 15 to 41 damage)
         if (game.getStack().isEmpty() && game.getPhaseHandler().is(PhaseType.MAIN1, player)
