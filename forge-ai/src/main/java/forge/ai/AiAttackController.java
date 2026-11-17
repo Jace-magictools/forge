@@ -1144,6 +1144,10 @@ public class AiAttackController {
                         combat.addAttacker(attacker, defender);
                     }
                 }
+                // magic-tools rule 319 (D204): nothing can block, one exalted attacker beats the whole group
+                if (attackMax == null) {
+                    AttackTriggerPump319.keepLone(ai, defender, combat, this.blockers);
+                }
                 // no more creatures to attack
                 return aiAggression;
             }
@@ -1509,6 +1513,10 @@ public class AiAttackController {
                 }
             }
 
+            // magic-tools rule 319 (D204): the group cannot be blocked, one exalted attacker beats it
+            if (aiAggression < 5 && attackMax == null) {
+                AttackTriggerPump319.keepLone(ai, defendingOpponent, combat, this.blockers);
+            }
             return aiAggression;
         } finally {
             if (trackTimer) {
@@ -1553,6 +1561,12 @@ public class AiAttackController {
             return numberOfPossibleBlockers > 2
                     || (numberOfPossibleBlockers >= 1 && CombatUtil.canAttackerBeBlockedWithAmount(attacker, 1, defendingOpponent))
                     || (numberOfPossibleBlockers == 2 && CombatUtil.canAttackerBeBlockedWithAmount(attacker, 2, defendingOpponent));
+        }
+
+        // magic-tools rule 319 (D204): an attacker pumped by its own attack triggers (exalted) is blocked as pumped
+        private boolean blockedProfitably319(final List<Card> validBlockers, final Combat combat) {
+            final Boolean pumped = AttackTriggerPump319.blockedProfitably(ai, attacker, validBlockers, combat);
+            return pumped != null ? pumped : ComputerUtilCard.canBeBlockedProfitably(defendingOpponent, attacker, true);
         }
 
         private void calculate(final List<Card> defenders, final Combat combat) {
@@ -1631,7 +1645,7 @@ public class AiAttackController {
                 canBeKilledByOne = true;
                 isWorthLessThanAllKillers = false;
                 hasCombatEffect = false;
-            } else if ((canKillAllDangerous || !canBeKilled) && ComputerUtilCard.canBeBlockedProfitably(defendingOpponent, attacker, true)) {
+            } else if ((canKillAllDangerous || !canBeKilled) && blockedProfitably319(validBlockers, combat)) {
                 canKillAllDangerous = false;
                 canBeKilled = true;
             }
