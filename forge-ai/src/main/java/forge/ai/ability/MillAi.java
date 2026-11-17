@@ -38,6 +38,11 @@ public class MillAi extends SpellAbilityAi {
     
     @Override
     protected boolean checkPhaseRestrictions(final Player ai, final SpellAbility sa, final PhaseHandler ph) {
+        // magic-tools rule 320: a winning mill loop (Melira + Kitchen Finks + Altar of Dementia) runs at any priority, in the
+        // opponent's upkeep or in response to a wrath, not only from main phase 2 on (a tester, 17/11)
+        if (NewAi.on(ai, 320) && PersistLoopAi.millLoopCard(ai, sa) != null) {
+            return true;
+        }
         if ("ExileAndPlayUntilEOT".equals(sa.getParam("AILogic"))) {
             return ph.is(PhaseType.MAIN1) && ph.isPlayerTurn(ai); // try to maximize the chance of being able to play the card this turn
         } else if ("ExileAndPlayOrDealDamage".equals(sa.getParam("AILogic"))) {
