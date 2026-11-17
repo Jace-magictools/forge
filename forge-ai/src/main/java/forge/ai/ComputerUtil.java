@@ -369,7 +369,14 @@ public class ComputerUtil {
         }
         if (pref.contains("SacCost")) {
             // magic-tools: a loop that wins (Redcap damage, Altar milling the opponent out) goes on whatever it feeds
-            final boolean winningLoop = sa != null && PersistLoopAi.anyLoopCard(ai, sa) != null;
+            final Card loopPiece = sa != null ? PersistLoopAi.anyLoopCard(ai, sa) : null;
+            final boolean winningLoop = loopPiece != null;
+            // magic-tools rule 322 (a tester, 17/11): the loop piece pays the outlet even
+            // without SacMe. Only Melira gives SacMe to persist creatures; with Thran Vigil (a +1/+1 counter on each
+            // return) the loop was seen but the cost refused: Altar of Dementia never milled with Safehold Elite.
+            if (loopPiece != null && NewAi.on(ai, 322) && typeList.contains(loopPiece)) {
+                return loopPiece;
+            }
             // search for permanents with SacMe. priority 1 is the lowest, priority 5 the highest
             for (int ip = 0; ip < 6; ip++) {
                 final int priority = 6 - ip;
